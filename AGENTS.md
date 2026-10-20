@@ -4,9 +4,9 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha planning**; no product functionality has been implemented.
+- Current phase: **pre-alpha, M0 host-feasibility implementation authorized**; no product functionality has yet been implemented or tested.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
-- The PRD and architecture are **proposals pending explicit owner review**. Do not silently treat a proposed design as an approved implementation contract.
+- The full PRD and architecture remain **proposed**, but the narrow M0 technical spike is authorized. See `docs/REVIEW_GATE.md`, `docs/M0_HANDOFF.md`, and `docs/M0_ACCEPTANCE.md`. Do not silently treat proposals as an approved M1+ implementation contract.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
 
 ## Scope and architecture
