@@ -1,6 +1,6 @@
 # Nail It Down — Architecture decisions and delivery contract
 
-**Status:** PROPOSED BASELINE — product-owner review before code changes  
+**Status:** M0 FEASIBILITY BASELINE AUTHORIZED (2026-10-20); FULL v0.1 PRODUCT ARCHITECTURE STILL PROPOSED  
 **Version:** 0.2.0-planning  
 **Date:** 2026-10-20  
 **Applies to:** Nail It Down, initially a Command Code interactive TUI mod  
@@ -22,7 +22,7 @@
 | ADR-007 | Development | ChatGPT High: design/docs; Pi: implementation; Codex: independent review; actual Command Code: integration validation | Efficient, leverages existing workflow | Reviews and host tests must have traceable evidence |
 | ADR-008 | Execution constraints | ThinkPad can edit/SSH; no builds/tests/deploy there. Remote runs deliberate and capped; no CI on every push | Avoid known resource waste | Manual validation remains necessary for interactive TUI |
 
-**State:** These are recommended decisions, not claims that the user has formally approved a versioned spec.
+**State:** The initial owner go-ahead authorizes **M0 only** under the conditions in [REVIEW_GATE.md](REVIEW_GATE.md); the complete v0.1 behavior, privacy contract and release architecture remain proposed until separately accepted.
 
 ## 2. Exact v0.1 user journey
 
@@ -183,4 +183,4 @@ Valid statuses: `new -> investigating -> interviewing -> review -> approved`, wi
 
 ---
 
-**Next authorization boundary:** architecture/PRD approval, followed by GitHub repository creation. The included M0 implementation instructions are prepared for Pi but are not a claim that any code, CI or repository has been created.
+**Current execution status:** GitHub repository and documentation foundation exist; **M0 host-feasibility implementation is authorized**. No M0 implementation or test result has been verified yet. M1 and later remain blocked on explicit acceptance after M0 review.
