@@ -73,7 +73,6 @@ The work is public:
 - [Product specification (draft)](docs/PRODUCT_SPEC_DRAFT.md)
 - [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
 - [M0 acceptance tests](docs/M0_ACCEPTANCE.md)
-- [How we write](docs/WRITING_GUIDE.md)
 
 ## Contributing
 
