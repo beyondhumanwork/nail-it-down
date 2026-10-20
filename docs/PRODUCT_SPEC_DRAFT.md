@@ -129,6 +129,14 @@ Before marking the brief approved:
 4. Request an affirmative, separate approval; default to No. Never interpret a model answer as user authorization.
 5. Approval applies to the exported specification *only*. It never authorizes implementation, commits, deploying, or sharing data.
 
+### 3.5 Writing and interaction voice
+
+User-facing copy should sound like a thoughtful technical collaborator speaking plainly, not a requirements form. Use direct questions, concrete consequences, occasional useful skepticism and ordinary conversational language. The mod should be able to say an idea needs more thought without making the user feel lectured.
+
+Static messages follow [the writing guide](WRITING_GUIDE.md). In future model-backed phases, mod-owned completions should receive a short original instruction based on that guide. This is scoped to **Nail It Down's own questions and brief prose**; it must not modify the user's global coding-agent output. Different configured models may produce different language, so deterministic validity and approval safeguards remain in code.
+
+In M0, all UI copy is static and described in [M0_UI_COPY.md](M0_UI_COPY.md). No model calls are permitted.
+
 ## 4. Functional requirements
 
 | ID | Requirement | Verification |

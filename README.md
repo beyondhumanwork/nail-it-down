@@ -1,77 +1,88 @@
 # Nail It Down
 
-**Stop guessing. Start building with clarity.**
+**Before you build something, make sure you know what it is.**
 
-Turn a rough software idea into a questioned, documented, **user-approved implementation brief** before a coding agent starts implementing it.
+Coding agents have made it cheap to write code. They've done less to make it cheap to figure out which code to write.
 
-> **Status: Pre-alpha — planning and host feasibility.** Nail It Down is **not available for installation**. The interface and capabilities described below are planned, not yet working or tested. We are developing a native [Command Code](https://commandcode.ai/) TypeScript mod in public.
+Suppose you tell an agent to add subscriptions to your app. It can probably build a billing flow. But there's a question it might never ask: who is the subscriber?
 
-## The problem
+Is it each person who signs up? A team? A company? These sound like variations on the same feature. They aren't. The answer affects who pays, who has access, and what happens when someone leaves a team.
 
-Coding agents can implement vague requests confidently while silently choosing the wrong scope, assumptions, data model, or edge-case behavior. Nail It Down is designed to surface those decisions *before* implementation.
+The dangerous part is that the agent can make these choices without telling you. By the time you discover them, they're code.
 
-## What we're building
+Nail It Down is a planned [Command Code](https://commandcode.ai/) mod for catching those decisions *before* implementation.
 
-- **Investigate, then ask.** Offer a no-repository-access idea mode; if approved, inspect bounded read-only project context instead of asking for facts already in code.
-- **Challenge the premise.** Highlight hidden assumptions, conflicts, and simpler alternatives.
-- **Resolve decisions deliberately.** Ask dependent questions in the right order and explain meaningful trade-offs.
-- **Keep durable context.** Track chosen answers, unresolved questions, and changed decisions.
-- **Produce a reviewable brief.** Preview requirements, non-goals, acceptance criteria, and verification steps; require explicit user approval.
+> **Pre-alpha. Not installable yet.** We're proving the basic integration with Command Code. The behavior below is planned, not shipped or tested.
 
-### Planned experience — illustrative only
+## How it would work
 
-~~~text
-/naildown Add subscription billing
+You start with a rough idea. Nail It Down asks the questions that matter, explains why they matter, and keeps track of your answers.
 
-Nail It Down (planned)
-Goal: Add subscription billing
-Question: Who owns the subscription?
-  • Each user
-  • Each workspace
-  • Something else
+Sometimes it should challenge the idea itself. You may be about to build a feature that already exists, or solve a problem that could be fixed with something much smaller. A useful assistant ought to notice that. There's not much value in carefully planning the wrong thing.
 
-Review pending decisions and trade-offs
-→ Approve a brief, or revise answers
-~~~
+### An example
 
-This is **not** an actual recording or proof that the mod currently works.
+```text
+/naildown Add subscriptions to my app
 
-## Safety by design
+Who pays for a subscription?
+  1. Each person
+  2. Each workspace
+  3. Something else
 
-The proposed mod will **not** edit implementation code, execute shell commands, auto-deploy, create remote accounts, or approve a plan on the user's behalf. Repository inspection will be opt-in and bounded. The configured model provider may receive user inputs and explicitly shared snippets; model calls can incur provider usage costs. Local host-backed persistence is not assumed encrypted.
+Why it matters:
+If the workspace pays, people can join and leave
+without each needing their own subscription.
 
-See [privacy design](docs/PRIVACY.md), [security policy](SECURITY.md), and the [draft architecture](docs/ARCHITECTURE_DECISIONS.md). Implementation and privacy assurances remain **unverified until tested**.
+Choose an answer, or tell me what I've missed.
+```
 
-## Current stage
+*Illustrative dialogue. This is not a real recording of a working mod.*
 
-**Now:** Review the product architecture and prove the basic Command Code API integration (milestone **M0**).
+You could then change your mind, return later, or ask what remains undecided. When the important questions are settled, the mod would produce a brief that another developer or coding agent could use.
 
-**Not yet:** Packaging, an installation command, supported-version claims, CI badges, npm release, or Mods Hub listing.
+The brief should distinguish what you decided from what the agent merely suggested. It should also say what is still unknown. A good specification doesn't make uncertainty disappear. It makes uncertainty visible.
 
-Read the [roadmap](docs/ROADMAP.md), [draft product specification](docs/PRODUCT_SPEC_DRAFT.md), [execution plan](docs/EXECUTION_PLAN.md), and [M0 implementation handoff](docs/M0_HANDOFF.md).
+## What about the codebase?
 
-## Development
+Sometimes the answer is already in the project.
 
-The repository begins documentation-first. Proposed development process:
+If you've already built workspace membership, the mod shouldn't quiz you about whether workspaces exist. It should be able to inspect a limited set of files **if you allow it**, then ask about the choices the code can't answer.
 
-1. Approve the architecture and product baseline.
-2. Implement **M0 only** using Pi, on a small reviewable branch.
-3. Validate the real TUI behavior in Command Code, record actual versions and test evidence.
-4. Request an independent review at major milestones.
-5. Add features incrementally; publish only after a verified release gate.
+You should be able to use it without granting repository access at all. And it should never treat something it hasn't checked as a verified fact.
 
-See [AGENTS.md](AGENTS.md) for coding-agent constraints and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidance.
+## What it won't do
 
-## Inspirations and originality
+Nail It Down is for deciding what to build. It isn't meant to build it.
 
-The problem and research were informed by existing open-source agent skills, notably [Matt Pocock's grilling workflow](https://github.com/mattpocock/skills). Our objective is an independently implemented, testable host-native workflow, not a rebranded copy. Any future copied or adapted third-party code must carry the required notices. See [research](docs/COMPETITIVE_AND_LICENSE_RESEARCH.md) and [third-party policy](THIRD-PARTY-NOTICES.md).
+It won't automatically edit your code, run project commands, deploy anything, or treat approval of a brief as permission to implement it.
 
-## Project
+The design calls for optional, bounded repository inspection and no separate telemetry service. When future versions ask a model to reason over project context, relevant user inputs or approved snippets may go to the configured model provider and consume usage. Host-backed saved state should not be assumed encrypted. Those safeguards still need to be implemented and verified.
 
-- **Maintainer:** [Beyond Human Work](https://github.com/beyondhumanwork)
-- **Contributing:** [Guide](CONTRIBUTING.md)
-- **Issues:** [Report a bug or suggest a feature](https://github.com/beyondhumanwork/nail-it-down/issues)
-- **Security:** [Disclosure policy](SECURITY.md)
-- **License:** [MIT](LICENSE)
+See [privacy](docs/PRIVACY.md) and [security](SECURITY.md).
 
-Built in the open, with functionality claims added only when verified.
+## Where things stand
+
+Right now we're working on **M0**, the smallest useful technical test: can Command Code load `/naildown`, ask a question, save an answer, and recover it after restarting?
+
+There are no model calls in M0. No npm package has been published, and there isn't a verified installation command.
+
+The work is public:
+
+- [Roadmap](docs/ROADMAP.md)
+- [Product specification (draft)](docs/PRODUCT_SPEC_DRAFT.md)
+- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- [M0 acceptance tests](docs/M0_ACCEPTANCE.md)
+- [How we write](docs/WRITING_GUIDE.md)
+
+## Contributing
+
+The goal isn't to ask the maximum number of questions. It's to ask the smallest number that prevents expensive misunderstandings.
+
+We're building the first version with [Pi](https://pi.dev/) and testing it in Command Code. New code will be reviewed before it reaches `main`. There is no automatic CI or publishing while we're still testing the host integration.
+
+If you'd like to help, see [CONTRIBUTING.md](CONTRIBUTING.md) or [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
+
+This project is informed by existing open-source planning skills, including [the grilling workflow](https://github.com/mattpocock/skills). The implementation is intended to be independently written. Any adapted third-party material will receive the notices its license requires. See [research](docs/COMPETITIVE_AND_LICENSE_RESEARCH.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+
+Maintained by [Beyond Human Work](https://github.com/beyondhumanwork). [MIT licensed](LICENSE).

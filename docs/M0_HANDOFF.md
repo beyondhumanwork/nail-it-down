@@ -11,6 +11,7 @@ You are implementing only **Milestone M0** for the public open-source project **
 The milestone is tracked by GitHub issue #2. Read [docs/M0_ACCEPTANCE.md](M0_ACCEPTANCE.md) and [docs/REVIEW_GATE.md](REVIEW_GATE.md) first. Work on a branch and open a PR; do not merge it or start M1 without separate review.
 
 Read before touching code:
+- `docs/WRITING_GUIDE.md` and `docs/M0_UI_COPY.md` — use the approved original UI wording without extra model calls;
 - `docs/PRODUCT_SPEC.md` (or `docs/PRODUCT_SPEC_DRAFT.md` if not formally approved),
 - `docs/ARCHITECTURE_DECISIONS.md`,
 - `AGENTS.md`, and
