@@ -1,12 +1,14 @@
 # Pi implementation handoff — Nail It Down, Milestone M0
 
-**Status:** READY TO USE *AFTER* documentation is reviewed and the repository exists.  
+**Status:** AUTHORIZED FOR M0 ONLY (2026-10-20). Repository foundation merged; full v0.1 product specification remains a draft.  
 **Milestone:** Host feasibility, no model calls, no repository scanning, no product features beyond a vertical slice.  
 **Owner:** Pi coding agent; validation in Command Code; optional independent Codex review.
 
 ## Copy-paste prompt for Pi
 
 You are implementing only **Milestone M0** for the public open-source project **Nail It Down**, a Command Code TypeScript mod.
+
+The milestone is tracked by GitHub issue #2. Read [docs/M0_ACCEPTANCE.md](M0_ACCEPTANCE.md) and [docs/REVIEW_GATE.md](REVIEW_GATE.md) first. Work on a branch and open a PR; do not merge it or start M1 without separate review.
 
 Read before touching code:
 - `docs/PRODUCT_SPEC.md` (or `docs/PRODUCT_SPEC_DRAFT.md` if not formally approved),
@@ -27,7 +29,7 @@ Build the smallest install-free Command Code mod that proves command registratio
 3. Register `/naildown <goal>`; display and persist the user-supplied goal.
 4. Ask one intentionally simple hard-coded question via `cmd.ui.select` or `cmd.ui.input`; record the user answer to `cmd.store` only after confirmed selection. Include `resume` and `status` as subcommands.
 5. Add a separate dummy approval confirmation which defaults to denied; do not permit headless approval. Treat aborted dialogs as no answer.
-6. Keep persistence versioned and appropriately scoped to a workspace. After a restart, resume without losing confirmed input.
+6. Keep persistence versioned and appropriately scoped to a workspace. The documented `cmd.store` is **per mod**, not per workspace: key records by a stable workspace identity derived from the host-provided cwd (or document a safer tested equivalent). Test isolation between two different workspace paths and ensure the host store write is awaited before claiming success. After a restart, resume without losing confirmed input.
 7. Add a short test plan or runnable automated tests for deterministic helpers, plus exact interactive smoke-test instructions. If a test cannot run, say **NOT RUN** and why.
 8. Keep changes small and auditable; document assumptions and any command API gaps.
 
@@ -51,6 +53,12 @@ Build the smallest install-free Command Code mod that proves command registratio
 - In headless, dialogs default to nonapproval and produce a safe status result.
 - No model calls, no subprocesses, no repo inspection, no leaking private data.
 - The final report includes exact files changed, commands actually executed, results/evidence, `cmd --version`, any API ambiguities, risks, and next steps.
+
+### Operating environment and evidence requirements
+
+Command Code currently documents Node.js **22+**, `cmd --mod ./src/index.ts`, native UI dialogs, and the mod store. Verify against the actually installed host, and don't silently auto-upgrade tools or modify the user's global environment.
+
+An M0 PR must include actual evidence of a real interactive TUI run, a process-restart recovery test, a cancellation/denial check, and a headless check—or explicitly mark blocked checks as **NOT RUN**. The code can be proposed without claiming M0 is done.
 
 ### Work sequence
 
