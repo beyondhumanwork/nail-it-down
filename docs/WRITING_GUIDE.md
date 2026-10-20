@@ -1,105 +1,160 @@
-# How Nail It Down writes
+# How Nail It Down speaks
 
-**Status:** Editorial standard for project-owned text. This is not a runtime feature and is not a claim that every model will produce the same prose.
+The code can be correct and the writing can still be wrong.
 
-We want a mod that sounds like a good technical collaborator: plainspoken, curious, precise, and willing to question an assumption. Users should understand what is being asked, why it matters, and what will happen next.
+Suppose the mod asks, "Please specify the desired ownership model for the proposed subscription architecture." It has asked a real question. But it has made the user do unnecessary work to understand it.
 
-This standard takes inspiration from the general writing principles described in Paul Graham's [Write Simply](https://paulgraham.com/simply.html) and [How to Write Usefully](https://paulgraham.com/useful.html). Write **original** prose; do not imitate his distinctive voice, quote or paraphrase long essay passages, suggest his involvement, or ship the essay excerpts supplied in an external example prompt.
+Ask "Who pays for the subscription?" instead.
 
-## The rules
+The difference isn't decoration. The second question makes it easier to think about the problem. That's what the writing in Nail It Down should do.
 
-1. **Say the thing plainly.** Prefer ordinary nouns and verbs. Avoid inflated language, jargon, corporate slogans and needless labels.
-2. **Start with the point.** Make the first sentence useful. Explain the reasoning in the next sentence if necessary.
-3. **Ask one real question at a time.** If two decisions depend on each other, settle the first one before asking the second.
-4. **Explain why the question matters.** A user should know what changes if they choose differently.
-5. **Challenge ideas without being adversarial.** Point out assumptions and simpler alternatives. Never mock users or turn questions into a performance.
-6. **Distinguish facts from guesses.** Say what was checked, what came from the user, and what is still unknown. Don't claim something was scanned, tested, saved or approved unless it was.
-7. **Be brief, not cryptic.** A modal can use one or two sentences. A security or privacy notice may need more.
-8. **Use a human tone without flattery.** No synthetic excitement, patronizing reassurances, roleplay or sales language.
-9. **Be accurate before being elegant.** Do not shorten warnings in a way that hides danger, cost, consent, limitations or reversibility.
-10. **Keep product terminology stable.** A decision is a decision. A suggestion is a suggestion. A reviewed brief is not permission to implement code.
+This guide applies to the README, help text, menus, questions, explanations, confirmations, errors, examples, release notes, and prose the mod asks a model to generate. The instructions are for **original writing**. They are not a request to reproduce another writer's sentences or make claims of authorship.
 
-## Examples (original copy, not shipped functionality)
+## The voice
 
-| Situation | Avoid | Prefer |
-| --- | --- | --- |
-| First question | Please specify your preferred subscription ownership strategy. | Who pays for the subscription: a person or a workspace? |
-| Reason | This is critical for downstream billing architecture decisions. | This decides who gets billed when someone joins or leaves a team. |
-| Premise check | Assess the necessity of this feature before proceeding. | Do you need a new feature, or could the existing one do the job? |
-| Unknown fact | No billing system was found. | I haven't checked whether billing already exists. |
-| Recommendation | We strongly recommend implementing option B. | I'd choose B. It fits the existing workspace model, though it means handling team changes. |
-| Resume | Your workflow has successfully been restored. | You're back where you left off. Two decisions are still open. |
-| Save failure | Persisting state failed due to an unexpected error. | I couldn't save that answer. Nothing was marked as saved. |
-| Approval | Congratulations! Your plan is finalized and implementation ready. | You've approved the brief. No code has been changed. |
-| Cancellation | Action cancelled successfully. | Stopped. Your earlier answers are still here. |
-| Unavailable model | We are unable to perform this operation. | The model isn't available. Your answers are still saved. |
+**Simple.** Use ordinary words. The writing should sound like an experienced programmer explaining something to another person, not a department writing a policy.
 
-Examples must be adapted to actual state. Never show "your earlier answers are still here" unless they have been durably persisted.
+**Conversational.** Write what you could reasonably say out loud. Contractions are fine. Rhetorical questions are useful when they lead to a real point.
 
-## Which writing belongs to the product?
+**Curious.** Find what's strange or incomplete about an idea. Ask why something is needed before asking how to implement it.
 
-**Public-facing, written by us:**
-- README opening, release notes and public explanations;
-- onboarding, commands, help descriptions and examples;
-- menu labels, question framing, error and confirmation messages;
-- issue and PR templates, contribution guidance, privacy and security notices;
-- snippets and templates used in exported briefs;
-- prompts we explicitly own and supply to the mod's model call.
+**Skeptical.** A proposal is not a fact. An answer is not necessarily a good answer. Show the weaknesses of the obvious approach without trying to win an argument.
 
-**Technical material may use standard terminology:** licenses, protocol names, API/type signatures, schemas, security rules, diagnostics, configuration keys, test evidence and normative acceptance criteria. Clarity is more important than a uniform "voice" in these documents.
+**Concrete.** Use the smallest example that makes a consequence visible. "If the workspace pays, what happens when the owner leaves?" is more useful than "Consider subscription lifecycle edge cases."
 
-**Do not rewrite:** user-submitted goals and answers, code, file paths, source excerpts, third-party licenses, tool stdout/stderr, or accurate technical terms merely to fit an editorial voice.
+**Economical.** Keep the words that help; remove those that don't. Some ideas deserve a paragraph. A cancel button doesn't.
 
-## Runtime implementation plan
+**A little dry.** Understatement or understated humor can help when it's natural. Don't add jokes to security warnings or important confirmations.
 
-The first version of the mod is M0, a **no-model** host-feasibility slice.
+## How to write an explanation
 
-**M0 — static copy only**
-- Keep all visible strings in a small, reviewable copy module or equivalent constants.
-- Use plain wording for the one hard-coded question, `status`, `resume`, save errors and dummy approval.
-- Never introduce a model merely to polish a fixed string.
-- Test messages against actual stored state and default-deny behavior.
+A useful pattern is:
 
-**M1–M2 — domain logic and optional context**
-- Maintain deterministic statuses, evidence and user approval regardless of wording.
-- Do not let a writing guideline override consent or data bounds.
+1. Start with a fact, question, or observation.
+2. Show why the obvious answer may not be enough.
+3. Use a concrete example or consequence.
+4. End with the specific decision the user needs to make.
 
-**M3 onward — model-generated questions and explanations**
-- Use `cmd.model.complete({ system, prompt, ... })` for mod-owned completions **after verifying the installed host API**.
-- Provide a short *original* instruction containing this guide's principles, the job of the output, and a few brief original examples only when necessary.
-- Request structured fields for question, why-it-matters, options, consequence and recommendation; validate schema before presentation.
-- Do not insert a 52 KB essay prompt, publish copyrighted examples, intercept the entire assistant's responses, or add an always-on global style hook.
-- Keep UI templates and decision state independent of model-generated text.
-- Do not promise uniform tone across the user's selected models. On failures, use clear deterministic messages.
+Don't use this as a fixed template. Most UI messages need only a sentence or two.
 
-**M4 onward — brief generation**
-- Use fixed headings and data-backed facts; allow the model to draft only prose fields that need it.
-- Preserve the exact meaning of confirmed user answers. Separate facts, decisions, assumptions and open questions.
-- The user can review and edit before approval; style never changes the approval snapshot.
+### Original examples
 
-## Editorial checks at review
+**Explaining a question**
 
-Read the result as someone who has never seen the code. Can they answer:
-- What is being asked or reported?
-- Why does it matter?
-- What was actually checked?
-- What changes if they agree or refuse?
-- What has been saved or sent, and to whom?
+> Who owns the subscription?
+>
+> It may sound like a small detail. But if a workspace pays, you need to decide what happens when people join or leave it.
 
-Also reject:
-- sweeping confidence claims, invented progress or promotional adjectives;
-- unnecessary acronyms and repetitive filler;
-- patronizing or hostile challenges;
-- unclear choices, hidden side effects and euphemistic security errors;
-- text that imitates or reproduces another author's recognizable writing.
+**Challenging a premise**
 
-Test sample outputs across at least two materially different model configurations at a later milestone. Score *clarity, accuracy, concision, fidelity to user decisions, and helpful challenge* separately. A fluent answer that invents a fact fails.
+> Why build a new settings page?
+>
+> There's already one in this project. Is something missing from it, or do you want a different way to organize settings?
 
-## References
+The second sentence must not claim an existing page unless the mod actually verified it.
 
-- Paul Graham, [Write Simply](https://paulgraham.com/simply.html), March 2021.
-- Paul Graham, [How to Write Usefully](https://paulgraham.com/useful.html), February 2020.
-- [Command Code Mods API](https://commandcode.ai/docs/mods), including model completions and UI.
-- [OpenAI prompt engineering guidance](https://developers.openai.com/api/docs/guides/prompt-engineering), including model differences and evaluation.
+**Showing an assumption**
 
-These links are inspiration and background, not endorsement or a license to republish essays.
+> I'm assuming teams share one subscription. You haven't decided that yet. Should we settle it before going further?
+
+**Making a recommendation**
+
+> I'd start with one plan. Three plans may look more flexible, but they also mean three sets of upgrade and downgrade rules.
+
+**Showing a trade-off**
+
+> A shorter grace period is simpler. But users may lose access before they have a chance to fix a failed payment.
+
+**A saved answer**
+
+> Saved. We'll treat the workspace as the subscriber.
+
+Show this only after the host has confirmed the write. The choice must really be the user's answer.
+
+**A failed save**
+
+> I couldn't save that answer. You can try again. I won't pretend it went through.
+
+**Resuming**
+
+> We settled who pays. We still need to decide what happens when a payment fails.
+
+Only say this when the restored state supports it.
+
+**Approval**
+
+> You've approved this brief. No code has been changed.
+
+Approval of a brief is not permission to implement it.
+
+## What to avoid
+
+- Inflated words: *leverage, streamline, comprehensive, robust, seamless, empower, innovative, revolutionary*.
+- Generic praise: *Great question! Amazing idea! Excellent choice!*
+- Corporate introductions: *In today's fast-paced development landscape...*
+- Unnecessary abstractions: *subscription ownership strategy* when *who pays* will do.
+- False certainty: *We've checked everything* after checking only a few files.
+- Performance of skepticism: contrarian questions asked merely to sound clever.
+- Long explanations before simple yes/no choices.
+- Forced analogies, jokes, philosophical digressions or invented stories.
+- Copying user inputs into a prettier but less accurate form.
+
+A good test is whether the sentence would still be useful if it were stripped of all its style.
+
+## Different surfaces need different lengths
+
+| Surface | Default approach |
+| --- | --- |
+| README | Short essay-like introduction, concrete scenario, then honest project status and links |
+| Product help | Explain what it does and when to use it in plain words |
+| Question | One clear decision, followed by the reason it matters |
+| Recommendation | State a preference, its basis, and an important trade-off |
+| Error | What failed, whether anything was saved or changed, and what to do |
+| Consent | Precisely what will be read, sent, saved or changed; straightforward Yes/No |
+| Saved brief | Clear headings and useful prose; exact user decisions and source evidence preserved |
+| Security/privacy docs | Accuracy, specific boundaries and completeness ahead of compactness |
+| Code, schemas, API references | Standard technical terminology; no essay-like embellishment |
+
+Never soften a security or privacy warning to maintain a conversational mood.
+
+## Model-generated writing
+
+Not all of Nail It Down's future questions will be hard-coded. Some will be generated by the model the user has chosen.
+
+When model completions are introduced **after M0**, the mod should pass a short, original writing instruction in its own request. The mod should not alter the coding agent's global personality, intercept other responses, or send another model request merely to rewrite a sentence.
+
+### Proposed mod-owned instruction
+
+```text
+Write as a thoughtful, practical programmer speaking to another person.
+Use simple conversational English. Be concise, but explain the
+consequence of an important choice. Ask specific questions, not broad
+surveys. Question assumptions where there's a good reason.
+Prefer concrete examples to abstract claims. Avoid praise, slogans,
+corporate jargon, and forced cleverness.
+
+Separate confirmed facts from user statements and suggestions.
+Don't claim to have checked files or run tests unless the supplied
+evidence establishes that. Preserve the meaning of the user's answers.
+Return only the requested structured fields.
+```
+
+This is a **proposal**, not an instruction currently running in the mod. Models may follow it differently. Schema validation, deterministic state, honest error messages and user review are required regardless of tone.
+
+## What not to rewrite
+
+User-provided goals and answers; citations; exact quotes from project files; code; paths; logs; legal notices; version numbers; command outputs; or test evidence. If technical language is required for accuracy, use it and explain it.
+
+## Review checklist
+
+Before merging a user-facing change, ask:
+
+1. Would an intelligent stranger understand this without the codebase in front of them?
+2. Does the first sentence say something useful?
+3. Is there a hidden assumption that should be made visible?
+4. Are the facts, guesses, recommendations, and user decisions kept separate?
+5. Does the text explain what happens if the user agrees?
+6. Could it be shorter without losing meaning?
+7. Would the message remain accurate on failure, cancellation, or a different model?
+
+For eventual generated copy, run a small fixed evaluation set across different model configurations. Grade clarity, specificity, factual fidelity, brevity, useful skepticism, and consent correctness. The most elegant false statement still fails.
