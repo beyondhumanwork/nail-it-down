@@ -65,7 +65,7 @@ See [privacy](docs/PRIVACY.md) and [security](SECURITY.md).
 
 Right now we're working on **M0**, the smallest useful technical test: can Command Code load `/naildown`, ask a question, save an answer, and recover it after restarting?
 
-There are no model calls in M0. No npm package has been published, and there isn't a verified installation command.
+The mod isn't ready to install yet. We'll publish installation instructions once we've tested a working version.
 
 The work is public:
 
@@ -77,8 +77,6 @@ The work is public:
 ## Contributing
 
 The goal isn't to ask the maximum number of questions. It's to ask the smallest number that prevents expensive misunderstandings.
-
-We're building the first version with [Pi](https://pi.dev/) and testing it in Command Code. New code will be reviewed before it reaches `main`. There is no automatic CI or publishing while we're still testing the host integration.
 
 If you'd like to help, see [CONTRIBUTING.md](CONTRIBUTING.md) or [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
 
