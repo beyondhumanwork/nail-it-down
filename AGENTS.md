@@ -23,13 +23,6 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 - Do not publish npm packages, releases, modify repository settings, or submit to registries without explicit authorization.
 - Work on a short-lived branch, keep changes focused, and use reviewable pull requests. Don't push or merge without the authorized workflow.
 
-## Writing and product language
-
-- Follow [the writing guide](docs/WRITING_GUIDE.md) for every user-facing string, prompt owned by the mod, help message, README change, example, and generated brief template.
-- Write original prose that is conversational, curious, skeptical, concrete, and economical; see [the writing guide](docs/WRITING_GUIDE.md). Do not reproduce outside essay examples or publish any supplied style prompt.
-- Never rewrite user input, trusted facts, tool output, warnings or approval state just to make them sound nicer.
-- M0 uses reviewed static strings from [the M0 copy sheet](docs/M0_UI_COPY.md). Do not add model-based style generation to this milestone.
-- When eventual model completions are introduced, scope voice guidance to the mod's own calls rather than the whole host agent.
 
 ## Security and reporting
 
