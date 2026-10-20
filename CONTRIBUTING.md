@@ -12,7 +12,7 @@ Thanks for helping make Nail It Down reliable and useful.
 
 ## Writing
 
-Anything contributors write for users should follow [the writing guide](docs/WRITING_GUIDE.md). We want plain, exact language rather than marketing copy. This includes help text, errors, documentation, examples and future model-owned prompts. Accuracy and safety come first.
+Anything contributors write for users should follow [the writing guide](docs/WRITING_GUIDE.md). We want original, conversational writing that starts with the problem, asks the useful question, explains concrete consequences, and leaves out marketing copy. This includes help text, errors, documentation, examples and future model-owned prompts. Accuracy and safety come first.
 
 ## Pull requests
 
