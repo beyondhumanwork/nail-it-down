@@ -10,6 +10,10 @@ Thanks for helping make Nail It Down reliable and useful.
 - Check [open issues](https://github.com/beyondhumanwork/nail-it-down/issues) for current scope and known limitations.
 - For significant changes, propose a narrowly scoped issue describing the problem, approach, alternatives and acceptance criteria.
 
+## Writing
+
+Anything contributors write for users should follow [the writing guide](docs/WRITING_GUIDE.md). We want plain, exact language rather than marketing copy. This includes help text, errors, documentation, examples and future model-owned prompts. Accuracy and safety come first.
+
 ## Pull requests
 
 1. Use a topic branch and submit a focused PR.
