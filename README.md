@@ -1,24 +1,41 @@
+<div align="center">
+
 # Nail It Down
 
-**Before you build something, make sure you know what it is.**
+### Before you build something, figure out what it is.
 
-Coding agents have made it cheap to write code. They've done less to make it cheap to figure out which code to write.
+A planned [Command Code](https://commandcode.ai/) mod that catches expensive decisions before your coding agent turns them into code.
 
-Suppose you tell an agent to add subscriptions to your app. It can probably build a billing flow. But there's a question it might never ask: who is the subscriber?
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square)
+![Built for Command Code](https://img.shields.io/badge/built%20for-Command%20Code-black?style=flat-square)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
-Is it each person who signs up? A team? A company? These sound like variations on the same feature. They aren't. The answer affects who pays, who has access, and what happens when someone leaves a team.
+[How it works](#how-it-would-work) · [Privacy](#what-it-wont-do) · [Status](#where-things-stand) · [Contributing](#contributing)
 
-The dangerous part is that the agent can make these choices without telling you. By the time you discover them, they're code.
+</div>
 
-Nail It Down is a planned [Command Code](https://commandcode.ai/) mod for catching those decisions *before* implementation.
+---
 
-> **Pre-alpha. Not installable yet.** We're proving the basic integration with Command Code. The behavior below is planned, not shipped or tested.
+> [!WARNING]
+> **Pre-alpha. Not installable yet.** We're proving the basic integration with Command Code. Everything below describes what we plan to build, not what exists.
+
+## The problem
+
+Coding agents have made code cheap to write. Deciding what to write is as hard as it ever was.
+
+Say you tell an agent to add subscriptions to your app. It will build a billing flow, and probably a decent one. But there's a question it may never ask: **who is the subscriber?**
+
+A person? A team? A company? These sound like the same feature. They aren't. The answer determines who pays, who has access, and what happens when someone leaves a team.
+
+The agent will pick one anyway, and it won't tell you. By the time you find out, the decision is code.
+
+Nail It Down exists to catch these decisions while they're still cheap to change.
 
 ## How it would work
 
-You start with a rough idea. Nail It Down asks the questions that matter, explains why they matter, and keeps track of your answers.
+You start with a rough idea. Nail It Down asks the questions that matter, tells you why each one matters, and keeps track of your answers.
 
-Sometimes it should challenge the idea itself. You may be about to build a feature that already exists, or solve a problem that could be fixed with something much smaller. A useful assistant ought to notice that. There's not much value in carefully planning the wrong thing.
+Sometimes the most useful question is whether to build the thing at all. You may be about to rebuild a feature you already have, or spend a week on a problem a small change would fix. A good collaborator would say so. It's a waste to plan the wrong thing carefully.
 
 ### An example
 
@@ -37,49 +54,68 @@ without each needing their own subscription.
 Choose an answer, or tell me what I've missed.
 ```
 
-*Illustrative dialogue. This is not a real recording of a working mod.*
+<sub>*Illustrative dialogue, not a recording of a working mod.*</sub>
 
-You could then change your mind, return later, or ask what remains undecided. When the important questions are settled, the mod would produce a brief that another developer or coding agent could use.
+You can change your mind, come back later, or ask what's still undecided. When the important questions are settled, the mod writes a brief that another developer or coding agent can build from.
 
-The brief should distinguish what you decided from what the agent merely suggested. It should also say what is still unknown. A good specification doesn't make uncertainty disappear. It makes uncertainty visible.
+The brief separates **what you decided** from **what the agent merely suggested**, and it lists what's still unknown. A good spec doesn't make uncertainty go away. It makes it visible.
 
 ## What about the codebase?
 
-Sometimes the answer is already in the project.
+Sometimes the answer is already in the code. If you've built workspace membership, the mod shouldn't ask whether workspaces exist.
 
-If you've already built workspace membership, the mod shouldn't quiz you about whether workspaces exist. It should be able to inspect a limited set of files **if you allow it**, then ask about the choices the code can't answer.
-
-You should be able to use it without granting repository access at all. And it should never treat something it hasn't checked as a verified fact.
+So, if you allow it, it can read a limited set of files and ask only about the choices the code can't answer. You can also use it without giving it repository access at all. Either way, it never treats something it hasn't checked as fact.
 
 ## What it won't do
 
-Nail It Down is for deciding what to build. It isn't meant to build it.
+Nail It Down decides what to build. It doesn't build it.
 
-It won't automatically edit your code, run project commands, deploy anything, or treat approval of a brief as permission to implement it.
+| It will | It won't |
+| :--- | :--- |
+| Ask the questions that prevent expensive misunderstandings | Edit your code |
+| Explain why each question matters | Run project commands |
+| Inspect a limited set of files, only if you allow it | Deploy anything |
+| Produce a brief that separates decisions from suggestions | Treat approval of a brief as permission to implement it |
 
-The design calls for optional, bounded repository inspection and no separate telemetry service. When future versions ask a model to reason over project context, relevant user inputs or approved snippets may go to the configured model provider and consume usage. Host-backed saved state should not be assumed encrypted. Those safeguards still need to be implemented and verified.
-
-See [privacy](docs/PRIVACY.md) and [security](SECURITY.md).
+> [!NOTE]
+> **Privacy, as designed.** Repository inspection is optional and bounded, and there's no separate telemetry service. When future versions ask a model to reason about your project, relevant inputs or approved snippets may go to your configured model provider and count against your usage. Saved state stored by the host shouldn't be assumed to be encrypted. None of these safeguards are implemented or verified yet.
+>
+> Details: [Privacy](docs/PRIVACY.md) · [Security](SECURITY.md)
 
 ## Where things stand
 
-Right now we're working on **M0**, the smallest useful technical test: can Command Code load `/naildown`, ask a question, save an answer, and recover it after restarting?
+We're working on **M0**, the smallest useful test: can Command Code load `/naildown`, ask a question, save the answer, and recover it after a restart?
 
-The mod isn't ready to install yet. We'll publish installation instructions once we've tested a working version.
+That's all for now. We'll publish installation instructions once something works.
 
 The work is public:
 
-- [Roadmap](docs/ROADMAP.md)
-- [Product specification (draft)](docs/PRODUCT_SPEC_DRAFT.md)
-- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
-- [M0 acceptance tests](docs/M0_ACCEPTANCE.md)
+- 🗺️ [Roadmap](docs/ROADMAP.md)
+- 📝 [Product specification (draft)](docs/PRODUCT_SPEC_DRAFT.md)
+- 🧱 [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- ✅ [M0 acceptance tests](docs/M0_ACCEPTANCE.md)
 
 ## Contributing
 
-The goal isn't to ask the maximum number of questions. It's to ask the smallest number that prevents expensive misunderstandings.
+The goal isn't to ask as many questions as possible. It's to ask the fewest that prevent an expensive misunderstanding.
 
-If you'd like to help, see [CONTRIBUTING.md](CONTRIBUTING.md) or [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
+If you'd like to help, read [CONTRIBUTING.md](CONTRIBUTING.md) or [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
 
-This project is informed by existing open-source planning skills, including [the grilling workflow](https://github.com/mattpocock/skills). The implementation is intended to be independently written. Any adapted third-party material will receive the notices its license requires. See [research](docs/COMPETITIVE_AND_LICENSE_RESEARCH.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+<details>
+<summary><strong>Prior art and licensing</strong></summary>
 
-Maintained by [Beyond Human Work](https://github.com/beyondhumanwork). [MIT licensed](LICENSE).
+<br>
+
+This project is informed by existing open-source planning skills, including [the grilling workflow](https://github.com/mattpocock/skills). The implementation is independently written, and any adapted third-party material gets the notices its license requires.
+
+See [research](docs/COMPETITIVE_AND_LICENSE_RESEARCH.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
+
+</details>
+
+---
+
+<div align="center">
+
+Maintained by [Beyond Human Work](https://github.com/beyondhumanwork) · [MIT licensed](LICENSE)
+
+</div>
