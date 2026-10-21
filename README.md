@@ -1,23 +1,58 @@
-<div align="center">
+<p align="center">
+  <img src="assets/banner.svg" alt="Nail It Down: before you build something, figure out what it is." width="100%">
+</p>
 
-# Nail It Down
 
-### Before you build something, figure out what it is.
+<p align="center">
+  <a href="https://github.com/beyondhumanwork/nail-it-down"><img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square"></a>
+  <a href="https://commandcode.ai/"><img alt="Built for Command Code" src="https://img.shields.io/badge/built%20for-Command%20Code-111827?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
+  <a href="https://github.com/beyondhumanwork/nail-it-down/issues"><img alt="Open issues" src="https://img.shields.io/github/issues/beyondhumanwork/nail-it-down?style=flat-square"></a>
+  <a href="CONTRIBUTING.md"><img alt="Contributions welcome" src="https://img.shields.io/badge/contributions-welcome-brightgreen?style=flat-square"></a>
+</p>
 
-A planned [Command Code](https://commandcode.ai/) mod that catches expensive decisions before your coding agent turns them into code.
 
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange?style=flat-square)
-![Built for Command Code](https://img.shields.io/badge/built%20for-Command%20Code-black?style=flat-square)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+<p align="center">
+  <a href="#the-problem">The problem</a> ·
+  <a href="#how-it-would-work">How it works</a> ·
+  <a href="#principles">Principles</a> ·
+  <a href="#faq">FAQ</a> ·
+  <a href="#where-things-stand">Status</a> ·
+  <a href="#contributing">Contributing</a>
+</p>
 
-[How it works](#how-it-would-work) · [Privacy](#what-it-wont-do) · [Status](#where-things-stand) · [Contributing](#contributing)
-
-</div>
 
 ---
 
+**Nail It Down** is a planned [Command Code](https://commandcode.ai/) mod that catches expensive decisions before your coding agent turns them into code. You bring a rough idea. It asks the few questions that matter, and hands back a brief that a developer or an agent can build from.
+
 > [!WARNING]
 > **Pre-alpha. Not installable yet.** We're proving the basic integration with Command Code. Everything below describes what we plan to build, not what exists.
+
+|                        |                                                |
+| :--------------------- | :--------------------------------------------- |
+| **Status**             | Pre-alpha. Working on milestone **M0**         |
+| **Works with**         | [Command Code](https://commandcode.ai/)        |
+| **Install**            | Not available yet                              |
+| **Needs repo access?** | No. Optional and bounded, only if you allow it |
+| **License**            | [MIT](LICENSE)                                 |
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+
+- [The problem](#the-problem)
+- [How it would work](#how-it-would-work)
+  - [An example](#an-example)
+  - [What about the codebase?](#what-about-the-codebase)
+- [Principles](#principles)
+- [What it won't do](#what-it-wont-do)
+- [FAQ](#faq)
+- [Where things stand](#where-things-stand)
+- [Contributing](#contributing)
+- [Prior art and licensing](#prior-art-and-licensing)
+
+</details>
 
 ## The problem
 
@@ -34,6 +69,15 @@ Nail It Down exists to catch these decisions while they're still cheap to change
 ## How it would work
 
 You start with a rough idea. Nail It Down asks the questions that matter, tells you why each one matters, and keeps track of your answers.
+
+```mermaid
+flowchart LR
+    A["Rough idea"] --> B["Questions that matter"]
+    B --> C["Your decisions"]
+    C --> D["Brief"]
+    B -. "challenges the idea itself" .-> A
+    R["Your codebase"] -. "only if you allow it" .-> B
+```
 
 Sometimes the most useful question is whether to build the thing at all. You may be about to rebuild a feature you already have, or spend a week on a problem a small change would fix. A good collaborator would say so. It's a waste to plan the wrong thing carefully.
 
@@ -60,33 +104,98 @@ You can change your mind, come back later, or ask what's still undecided. When t
 
 The brief separates **what you decided** from **what the agent merely suggested**, and it lists what's still unknown. A good spec doesn't make uncertainty go away. It makes it visible.
 
-## What about the codebase?
+### What about the codebase?
 
 Sometimes the answer is already in the code. If you've built workspace membership, the mod shouldn't ask whether workspaces exist.
 
 So, if you allow it, it can read a limited set of files and ask only about the choices the code can't answer. You can also use it without giving it repository access at all. Either way, it never treats something it hasn't checked as fact.
 
+## Principles
+
+1. **Ask the fewest questions that prevent an expensive misunderstanding.** Not the most.
+2. **Explain why each question matters.** A question with no stakes attached is just friction.
+3. **Keep decisions and suggestions apart.** What you chose and what the agent proposed are different things, and the brief says which is which.
+4. **Make uncertainty visible.** Unknowns belong in the brief, not buried in an assumption.
+5. **Never present the unchecked as verified.**
+6. **Work without your repository.** Access is optional, bounded, and yours to grant.
+
 ## What it won't do
 
 Nail It Down decides what to build. It doesn't build it.
 
-| It will | It won't |
-| :--- | :--- |
-| Ask the questions that prevent expensive misunderstandings | Edit your code |
-| Explain why each question matters | Run project commands |
-| Inspect a limited set of files, only if you allow it | Deploy anything |
-| Produce a brief that separates decisions from suggestions | Treat approval of a brief as permission to implement it |
+| It will                                                    | It won't                                                |
+| :--------------------------------------------------------- | :------------------------------------------------------ |
+| Ask the questions that prevent expensive misunderstandings | Edit your code                                          |
+| Explain why each question matters                          | Run project commands                                    |
+| Inspect a limited set of files, only if you allow it       | Deploy anything                                         |
+| Produce a brief that separates decisions from suggestions  | Treat approval of a brief as permission to implement it |
 
 > [!NOTE]
 > **Privacy, as designed.** Repository inspection is optional and bounded, and there's no separate telemetry service. When future versions ask a model to reason about your project, relevant inputs or approved snippets may go to your configured model provider and count against your usage. Saved state stored by the host shouldn't be assumed to be encrypted. None of these safeguards are implemented or verified yet.
 >
 > Details: [Privacy](docs/PRIVACY.md) · [Security](SECURITY.md)
 
+## FAQ
+
+<details>
+<summary><b>Does it write code?</b></summary>
+
+
+<br>
+
+No. It decides what to build and stops there. It won't edit your code, run project commands, or deploy anything, and approving a brief is not permission to implement it.
+
+</details>
+
+<details>
+<summary><b>Does it need access to my repository?</b></summary>
+
+
+<br>
+
+No. You can use it without granting any repository access. If you do allow it, it can inspect a limited set of files so it doesn't ask about things your code already answers.
+
+</details>
+
+<details>
+<summary><b>What does the brief contain?</b></summary>
+
+
+<br>
+
+The decisions you made, the suggestions the agent offered (kept separate from your decisions), and the questions that are still open. Another developer or coding agent should be able to build from it.
+
+</details>
+
+<details>
+<summary><b>Where does my data go?</b></summary>
+
+
+<br>
+
+There's no separate telemetry service. When future versions ask a model to reason about your project, relevant inputs or approved snippets may go to your configured model provider. See [Privacy](docs/PRIVACY.md) and [Security](SECURITY.md). These safeguards are still being implemented and verified.
+
+</details>
+
+<details>
+<summary><b>Can I install it?</b></summary>
+
+
+<br>
+
+Not yet. We'll publish installation instructions once we've tested a working version.
+
+</details>
+
 ## Where things stand
 
 We're working on **M0**, the smallest useful test: can Command Code load `/naildown`, ask a question, save the answer, and recover it after a restart?
 
 That's all for now. We'll publish installation instructions once something works.
+
+| Milestone | Question it answers                                          | Status        |
+| :-------- | :----------------------------------------------------------- | :------------ |
+| **M0**    | Can Command Code load `/naildown`, ask a question, save an answer, and recover it after a restart? | 🚧 In progress |
 
 The work is public:
 
@@ -97,25 +206,25 @@ The work is public:
 
 ## Contributing
 
-The goal isn't to ask as many questions as possible. It's to ask the fewest that prevent an expensive misunderstanding.
+Contributions are welcome. It's early enough that they'll shape the project. Start with [CONTRIBUTING.md](CONTRIBUTING.md), or just [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
 
-If you'd like to help, read [CONTRIBUTING.md](CONTRIBUTING.md) or [open an issue](https://github.com/beyondhumanwork/nail-it-down/issues).
+A few good places to start:
 
-<details>
-<summary><strong>Prior art and licensing</strong></summary>
+- **Share a real example.** Has an agent ever made a decision for you without telling you? Open an issue describing it. Those are exactly the cases this mod should learn to catch.
+- **Read the drafts.** The [product specification](docs/PRODUCT_SPEC_DRAFT.md) and [architecture decisions](docs/ARCHITECTURE_DECISIONS.md) are still open to feedback.
+- **Help with M0.** The [acceptance tests](docs/M0_ACCEPTANCE.md) show what "working" means for the first milestone.
 
-<br>
+## Prior art and licensing
 
 This project is informed by existing open-source planning skills, including [the grilling workflow](https://github.com/mattpocock/skills). The implementation is independently written, and any adapted third-party material gets the notices its license requires.
 
 See [research](docs/COMPETITIVE_AND_LICENSE_RESEARCH.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
-</details>
-
 ---
 
-<div align="center">
+<p align="center">
+  Maintained by <a href="https://github.com/beyondhumanwork">Beyond Human Work</a> · <a href="LICENSE">MIT licensed</a>
+  <br>
+  <sub><a href="#">Back to top ↑</a></sub>
+</p>
 
-Maintained by [Beyond Human Work](https://github.com/beyondhumanwork) · [MIT licensed](LICENSE)
-
-</div>
