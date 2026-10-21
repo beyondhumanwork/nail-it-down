@@ -1,7 +1,8 @@
 # M0 acceptance matrix — Command Code host feasibility
 
-**Status:** Execution checklist; no check has been run or passed yet.
-**Date:** 2026-10-20.
+**Status:** Checks executed 2026-10-20/21. Eleven of twelve pass; **M0-09 is blocked by the host**
+(`cmd -p` does not dispatch mod slash commands). Evidence and exact output: [M0_EVIDENCE.md](M0_EVIDENCE.md).
+**Date:** 2026-10-20 (initial checklist), results recorded 2026-10-21.
 **Owner:** Pi for implementation and evidence collection; product owner for acceptance.
 
 ## Environment
@@ -18,20 +19,22 @@ Official docs currently state Node.js 22+ is required; shipped ModApi signatures
 
 | ID | Check | Evidence needed | Result |
 | --- | --- | --- | --- |
-| M0-01 | Mod loads using `cmd --mod ./src/index.ts` without registration/load errors | Actual command output with version | NOT RUN |
-| M0-02 | `/naildown <goal>` registers, appears in TUI autocomplete, and preserves complete goal text | Screen/terminal record, steps and exact input | NOT RUN |
-| M0-03 | One hard-coded question appears; one explicit choice is recorded | Actual TUI interaction, no model call | NOT RUN |
-| M0-04 | UI cancellation creates no answer and no approval | Record before/after state | NOT RUN |
-| M0-05 | Answer persists across **process exit and restart**, not just hot reload | Repeatable steps and status output | NOT RUN |
-| M0-06 | Two workspace paths don't share answers | Separate workspace test | NOT RUN |
-| M0-07 | Failed store write is handled and never reports saved | Controlled fault or mocked store failure | NOT RUN |
-| M0-08 | Dummy approval defaults to No; an explicit denial cannot persist approval | TUI and store state | NOT RUN |
-| M0-09 | Headless mode cannot approve or invent an answer | Headless command and status output | NOT RUN |
-| M0-10 | No model calls, spawned subprocesses, repository scans, or implementation writes at mod runtime | Code review and observed execution | NOT RUN |
-| M0-11 | State schema/version present; unknown/corrupt stored values fail safely | Unit checks with invalid data | NOT RUN |
-| M0-12 | Documentation lists actual limitations and executed vs unexecuted checks | M0 PR body and evidence report | NOT RUN |
+| M0-01 | Mod loads using `cmd --mod ./src/index.ts` without registration/load errors | Actual command output with version | **PASS** |
+| M0-02 | `/naildown <goal>` registers, appears in TUI autocomplete, and preserves complete goal text | Screen/terminal record, steps and exact input | **PASS** |
+| M0-03 | One hard-coded question appears; one explicit choice is recorded | Actual TUI interaction, no model call | **PASS** |
+| M0-04 | UI cancellation creates no answer and no approval | Record before/after state | **PASS** |
+| M0-05 | Answer persists across **process exit and restart**, not just hot reload | Repeatable steps and status output | **PASS** |
+| M0-06 | Two workspace paths don't share answers | Separate workspace test | **PASS** |
+| M0-07 | Failed store write is handled and never reports saved | Controlled fault or mocked store failure | **PASS** |
+| M0-08 | Dummy approval defaults to No; an explicit denial cannot persist approval | TUI and store state | **PASS** — approval changed from `confirm` to `select` so the host pre-highlights No |
+| M0-09 | Headless mode cannot approve or invent an answer | Headless command and status output | **NOT RUN** — blocked: headless `-p` never dispatches mod commands (§5.4 of the evidence report) |
+| M0-10 | No model calls, spawned subprocesses, repository scans, or implementation writes at mod runtime | Code review and observed execution | **PASS** |
+| M0-11 | State schema/version present; unknown/corrupt stored values fail safely | Unit checks with invalid data | **PASS** |
+| M0-12 | Documentation lists actual limitations and executed vs unexecuted checks | M0 PR body and evidence report | **PASS** |
 
 **Pass criteria:** M0-01 through M0-12 must be **PASS** or receive an explicit, documented exception for a blocked environment check; do not claim completed host feasibility without a real TUI restart demonstration. Tests that are not run are not passes.
+
+**Outcome:** eleven checks PASS, including a real TUI restart demonstration and a default-deny approval. M0-09 is documented as blocked rather than passed. See [M0_EVIDENCE.md](M0_EVIDENCE.md) for the command output behind each row and §5 for the host API mismatches found along the way.
 
 ## Out of scope
 
