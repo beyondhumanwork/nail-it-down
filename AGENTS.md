@@ -4,7 +4,7 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha, M0 host-feasibility implementation authorized**; no product functionality has yet been implemented or tested.
+- Current phase: **pre-alpha, M0 host-feasibility spike implemented and verified against Command Code 1.84.0** (2026-10-21). Results, host API mismatches and limitations are in `docs/M0_EVIDENCE.md`. M1 and later are **not** authorized.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
 - The full PRD and architecture remain **proposed**, but the narrow M0 technical spike is authorized. See `docs/REVIEW_GATE.md`, `docs/M0_HANDOFF.md`, and `docs/M0_ACCEPTANCE.md`. Do not silently treat proposals as an approved M1+ implementation contract.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
@@ -18,7 +18,8 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Resource and operational rules
 
-- **Do not run builds/tests/deployments on the constrained ThinkPad.** Editing and SSH from it are allowed; use deliberate, approved remote compute. If unavailable, report checks as **NOT RUN**.
+- **The ThinkPad is not a build or test machine.** Source editing and SSH are allowed there; builds, test suites, CI workloads and deployments must run on deliberate, approved remote compute. If none is available, report checks as **NOT RUN**.
+  - *Owner clarification (2026-10-21):* this rule targets resource-intensive work. Lightweight manual verification using software already installed on the machine is allowed — this is how M0's interactive host checks were run, because Command Code is only installed there. Do not repeat unit tests or typechecks on that machine.
 - Do not add scheduled workflows, CI on every push, expensive matrix jobs, paid model evaluations, or deployments.
 - Do not publish npm packages, releases, modify repository settings, or submit to registries without explicit authorization.
 - Work on a short-lived branch, keep changes focused, and use reviewable pull requests. Don't push or merge without the authorized workflow.
