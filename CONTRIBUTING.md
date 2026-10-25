@@ -24,7 +24,23 @@ The maintainers may request changes or decline contributions that exceed the cur
 
 ## Development environment
 
-The repo has **no implemented mod or verified build setup yet**. M0 will establish and document the actual toolchain. Do not guess an installation command, test script, or supported version in the meantime.
+M0 established the toolchain. It uses Node's built-in test runner and type stripping, so the mod has **no runtime dependencies**:
+
+```bash
+npm install          # devDependencies only: typescript, @types/node
+npm run typecheck    # tsc --noEmit
+npm test             # node --test test/*.test.ts
+```
+
+Node 22.18 or newer is required to run the TypeScript tests without a build step. The mod itself loads through Command Code's own TypeScript loader, so it needs no build step either:
+
+```bash
+cmd --mod ./src/index.ts
+```
+
+[`docs/M0_EVIDENCE.md`](docs/M0_EVIDENCE.md) records the tested Command Code version, the interactive smoke test, and the host API limitations found during M0.
+
+`src/host/modApi.ts` is a hand-written description of the host surface this mod uses, because the `@commandcode/harness` package the official docs reference is not published to npm. If you touch the adapter, check it against the installed host and note the version you used.
 
 ## Attribution
 
