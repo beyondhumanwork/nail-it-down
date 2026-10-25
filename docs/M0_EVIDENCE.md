@@ -80,7 +80,8 @@ TYPECHECK=OK
 ### 3.2 Interactive host smoke test
 
 ```bash
-# the mod's own state lives here; these files are safe to delete
+# Inspect the host-managed per-mod store; do not delete it as test cleanup.
+# A single store file may contain records for multiple workspaces.
 ls ~/.commandcode/mods/.store/
 
 cd /tmp && mkdir -p m0-ws-one m0-ws-two
