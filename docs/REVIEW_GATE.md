@@ -1,6 +1,6 @@
 # Architecture review gate
 
-**Status:** M0 HOST-FEASIBILITY BASELINE AUTHORIZED — 2026-10-20.
+**Status:** M0 HOST-FEASIBILITY SPIKE FORMALLY ACCEPTED — 2026-10-25 (with documented M0-09 exception).
 **Full product v0.1 specification:** DRAFT, not yet approved for implementation beyond M0.
 
 The project owner authorized continued development after approving the repository foundation on 2026-10-20. This is recorded as permission to proceed with the narrowly defined **M0 technical feasibility spike only**, not blanket acceptance of every future product, privacy, branding, or release decision.
@@ -20,6 +20,13 @@ The project owner authorized continued development after approving the repositor
 - Work in a dedicated branch; submit a PR for review before merge.
 - Report each acceptance item as **PASS / FAIL / NOT RUN**, with actual evidence.
 - **Stop after M0**; M1 or later requires a separate decision.
+
+## M0 formal acceptance — 2026-10-25
+
+- M0 status: **ACCEPTED** by the product owner on 2026-10-25.
+- M0-09 remains a documented host exception (headless `-p` does not dispatch mod slash commands), not a passing test.
+- Evidence: 11/12 acceptance checks on Command Code 1.84.0; 57 unit tests and typecheck passed (not rerun on 1.88.0); owner-operated interactive verification on 1.88.0 confirmed default-deny and restart persistence; source inspection found no breaking changes.
+- The full v0.1 product specification remains a draft. M1 and later require separate authorization.
 
 ## Decisions still open for full product sign-off
 

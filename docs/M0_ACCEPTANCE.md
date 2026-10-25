@@ -36,6 +36,14 @@ Official docs currently state Node.js 22+ is required; shipped ModApi signatures
 
 **Outcome:** eleven checks PASS, including a real TUI restart demonstration and a default-deny approval. M0-09 is documented as blocked rather than passed. See [M0_EVIDENCE.md](M0_EVIDENCE.md) for the command output behind each row and §5 for the host API mismatches found along the way.
 
+## Formal owner acceptance — 2026-10-25
+
+- M0 status: **ACCEPTED** by the product owner on 2026-10-25, with M0-09 explicitly accepted as a documented host exception (not a passing test).
+- Original evidence: 11 of 12 checks PASS on Command Code 1.84.0; M0-09 blocked by host slash-command dispatch.
+- 57 unit tests and `tsc --noEmit` passed in the original M0 environment (not rerun on 1.88.0).
+- Command Code 1.88.0: source inspection found no breaking M0 API changes; owner-operated interactive TUI verification confirmed command execution, answer persistence, initial `No, do not approve` selection, default-deny approval, and restart recovery. No unexpected behavior.
+- The full product specification remains a draft. M1 and all later milestones remain unauthorized.
+
 ## Out of scope
 
 No model integration, repository reader, question graph, Markdown export, backend, releases, auto-CI, paid services, or registry submission.
