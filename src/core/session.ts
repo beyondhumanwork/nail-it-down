@@ -33,6 +33,13 @@ export type DecisionOption = {
   id: string;
   label: string;
   consequence: string;
+  /**
+   * Marks the option that means "no decision yet". Selecting it records the
+   * answer without settling it, so it can never satisfy a prerequisite or an
+   * approval. This flag is the deterministic option identity that keeps the
+   * rule off answer wording.
+   */
+  unresolved?: true;
 };
 
 export type DecisionAnswer = {
@@ -78,6 +85,50 @@ const DECISION_STATUSES: readonly DecisionStatus[] = [
 const PRIORITIES: readonly DecisionPriority[] = ['critical', 'important', 'minor'];
 const ANSWER_ACTORS: readonly DecisionAnswerActor[] = ['user', 'assumption'];
 
+/**
+ * Labels that explicitly mean "no decision yet". Only the M0 choice is listed,
+ * and it is matched exactly after whitespace normalization: an answer is never
+ * reclassified just because it mentions uncertainty in its own words.
+ */
+export const UNRESOLVED_ANSWER_LABELS: readonly string[] = ['I have not decided'];
+
+function normalizeAnswerText(text: string): string {
+  return text.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/** True only for an answer that is, by exact designation, not a decision. */
+export function isUnresolvedAnswerText(text: string): boolean {
+  const normalized = normalizeAnswerText(text);
+  return UNRESOLVED_ANSWER_LABELS.some((label) => normalizeAnswerText(label) === normalized);
+}
+
+/**
+ * One rule for both representations: an explicit unresolved option selection,
+ * or free text that exactly reproduces a designated undecided label. A chosen
+ * option is judged only by its identity, never by its prose.
+ */
+export function isUnresolvedAnswer(
+  answer: DecisionAnswer,
+  options: readonly DecisionOption[],
+): boolean {
+  if (answer.chosenOptionId !== undefined) {
+    return options.find((option) => option.id === answer.chosenOptionId)?.unresolved === true;
+  }
+  return isUnresolvedAnswerText(answer.text);
+}
+
+/**
+ * The only decisions that may satisfy a prerequisite or an approval: an answer
+ * that was given by the user or explicitly assumed, and that is not a recorded
+ * non-decision. `needs_review` is deliberately excluded — it retains an answer
+ * but that answer is stale.
+ */
+export function isSettledDecision(decision: Decision): boolean {
+  if (decision.status !== 'answered' && decision.status !== 'assumed') return false;
+  if (decision.answer === undefined) return false;
+  return !isUnresolvedAnswer(decision.answer, decision.options);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -88,11 +139,14 @@ function isFilledString(value: unknown): value is string {
 
 function readOption(value: unknown): DecisionOption | 'invalid' {
   if (!isPlainObject(value)) return 'invalid';
-  const { id, label, consequence } = value;
+  const { id, label, consequence, unresolved } = value;
   if (!isFilledString(id)) return 'invalid';
   if (!isFilledString(label)) return 'invalid';
   if (!isFilledString(consequence)) return 'invalid';
-  return { id, label, consequence };
+  if (unresolved !== undefined && unresolved !== true) return 'invalid';
+  const option: DecisionOption = { id, label, consequence };
+  if (unresolved === true) option.unresolved = true;
+  return option;
 }
 
 function readAnswer(value: unknown): DecisionAnswer | undefined | 'invalid' {
@@ -109,40 +163,53 @@ function readAnswer(value: unknown): DecisionAnswer | undefined | 'invalid' {
   return answer;
 }
 
-function readDecision(value: unknown): Decision | 'invalid' {
-  if (!isPlainObject(value)) return 'invalid';
+/** Returns the decision, or a short reason the decision cannot be trusted. */
+function readDecision(value: unknown): Decision | string {
+  if (!isPlainObject(value)) return 'it is not an object';
   const { id, question, whyItMatters, priority, prerequisites, status, options, answer, updatedAt } = value;
 
-  if (!isFilledString(id)) return 'invalid';
-  if (!isFilledString(question)) return 'invalid';
-  if (!isFilledString(whyItMatters)) return 'invalid';
-  if (typeof priority !== 'string' || !PRIORITIES.includes(priority as DecisionPriority)) return 'invalid';
-  if (!Array.isArray(prerequisites) || !prerequisites.every(isFilledString)) return 'invalid';
-  if (typeof status !== 'string' || !DECISION_STATUSES.includes(status as DecisionStatus)) return 'invalid';
-  if (!Array.isArray(options)) return 'invalid';
+  if (!isFilledString(id)) return 'it has no id';
+  if (!isFilledString(question)) return 'it has no question';
+  if (!isFilledString(whyItMatters)) return 'it has no reason';
+  if (typeof priority !== 'string' || !PRIORITIES.includes(priority as DecisionPriority)) return 'it has an unknown priority';
+  if (!Array.isArray(prerequisites) || !prerequisites.every(isFilledString)) return 'its prerequisites are not a list of ids';
+  if (typeof status !== 'string' || !DECISION_STATUSES.includes(status as DecisionStatus)) return 'it has an unknown status';
+  if (!Array.isArray(options)) return 'its options are not a list';
   const readOptions: DecisionOption[] = [];
   for (const option of options) {
     const parsed = readOption(option);
-    if (parsed === 'invalid') return 'invalid';
+    if (parsed === 'invalid') return 'one of its options is incomplete';
     readOptions.push(parsed);
   }
-  if (!isFilledString(updatedAt)) return 'invalid';
+  if (!isFilledString(updatedAt)) return 'it has no timestamp';
 
   const parsedAnswer = readAnswer(answer);
-  if (parsedAnswer === 'invalid') return 'invalid';
+  if (parsedAnswer === 'invalid') return 'its answer is incomplete';
 
-  // An answered decision requires a user-confirmed answer.
+  // An answer that names an option must name one this decision offers, so that
+  // "which option did the user pick" always has an answer.
+  const chosenOptionId = parsedAnswer?.chosenOptionId;
+  if (chosenOptionId !== undefined && !readOptions.some((option) => option.id === chosenOptionId)) {
+    return 'its answer names an option that does not exist';
+  }
+  const answerIsUnresolved = parsedAnswer !== undefined && isUnresolvedAnswer(parsedAnswer, readOptions);
+
   if (status === 'answered') {
-    if (parsedAnswer === undefined) return 'invalid';
-    if (parsedAnswer.actor !== 'user') return 'invalid';
+    if (parsedAnswer === undefined) return 'it is answered but carries no answer';
+    if (parsedAnswer.actor !== 'user') return 'it is answered by an assumption, not by the user';
+    if (answerIsUnresolved) return 'an undecided answer cannot be an answered decision';
+  } else if (status === 'assumed') {
+    if (parsedAnswer === undefined) return 'it is assumed but carries no assumption';
+    if (parsedAnswer.actor !== 'assumption') return 'it is assumed but carries a user answer';
+    if (answerIsUnresolved) return 'an undecided answer cannot be an assumed decision';
+  } else if (status === 'needs_review') {
+    // An upstream edit invalidated this decision but the answer it had is kept,
+    // marked stale by the status. It is retained, never settled.
+    if (answerIsUnresolved) return 'an undecided answer cannot be retained as a previous answer';
+  } else if (parsedAnswer !== undefined) {
+    // open, deferred and blocked hold no answer at all.
+    return 'a decision that is not answered cannot carry an answer';
   }
-  // An assumed decision requires an assumption answer.
-  if (status === 'assumed') {
-    if (parsedAnswer === undefined) return 'invalid';
-    if (parsedAnswer.actor !== 'assumption') return 'invalid';
-  }
-  // All other statuses must not carry an answer.
-  if (status !== 'answered' && status !== 'assumed' && parsedAnswer !== undefined) return 'invalid';
 
   const decision: Decision = {
     id,
@@ -190,7 +257,7 @@ export function readStoredSession(value: unknown): SessionReadResult {
   const ids = new Set<string>();
   for (const raw of decisions) {
     const parsed = readDecision(raw);
-    if (parsed === 'invalid') return { kind: 'unreadable', reason: 'session contains an incomplete decision' };
+    if (typeof parsed === 'string') return { kind: 'unreadable', reason: `session contains an invalid decision (${parsed})` };
     if (ids.has(parsed.id)) return { kind: 'unreadable', reason: `duplicate decision id (${parsed.id})` };
     ids.add(parsed.id);
     readDecisions.push(parsed);
@@ -213,14 +280,24 @@ export function readStoredSession(value: unknown): SessionReadResult {
     if (!hasApprovedAt || !hasSnapshot) {
       return { kind: 'unreadable', reason: 'approved session is missing approval metadata' };
     }
-    // No critical decision may be open/blocked/needs_review in an approved session.
+    // An approval over no decisions approves nothing.
+    if (readDecisions.length === 0) {
+      return { kind: 'unreadable', reason: 'approved session has no decisions to approve' };
+    }
+    // Blockers are reported before the snapshot, because a stale snapshot on a
+    // genuinely incomplete session is the less actionable of the two faults.
     for (const decision of readDecisions) {
-      if (decision.priority === 'critical' && decision.status !== 'answered') {
-        return { kind: 'unreadable', reason: `approved session has an unresolved critical decision (${decision.id})` };
-      }
       if (decision.status === 'needs_review') {
         return { kind: 'unreadable', reason: `approved session has a decision requiring review (${decision.id})` };
       }
+      if (decision.priority === 'critical' && !isSettledDecision(decision)) {
+        return { kind: 'unreadable', reason: `approved session has an unresolved critical decision (${decision.id})` };
+      }
+    }
+    // The snapshot must be the canonical text of exactly these decisions.
+    // Anything else is stale, hand-edited or fabricated.
+    if (approvedSnapshot !== canonicalDecisionSnapshot(readDecisions)) {
+      return { kind: 'unreadable', reason: 'approval snapshot does not match the session decisions' };
     }
   } else {
     if (hasApprovedAt || hasSnapshot) {
@@ -284,10 +361,21 @@ export function createSession(input: {
 }
 
 /**
- * Canonical JSON of the decision list, used as the M1 approval snapshot.
- * Deterministic: keys are sorted by JSON.stringify's default insertion order of
- * the constructed objects, which is fixed by the types above. No hashing here;
- * cryptographic hashing is deferred to M4/export.
+ * The canonical text of a decision list: the one representation an approval
+ * snapshot may use, both when it is produced and when it is verified.
+ *
+ * Ordering contract — two deliberately different things:
+ * - Decisions are written in the stored array order. The array is NOT sorted by
+ *   id, so reordering the decisions produces a different snapshot. Decision
+ *   order is part of what a person reviews, so it is part of the snapshot.
+ * - Object keys follow the fixed insertion order written below. They are NOT
+ *   lexicographically sorted, so a JSON with sorted keys, a pretty-printed
+ *   variant with different whitespace, or any extra field is a different
+ *   string and fails verification.
+ *
+ * Absent optional fields (`answer`, `chosenOptionId`, `unresolved`) are left out
+ * rather than written as null. No hashing here: this is a plain comparable
+ * string. Cryptographic hashing belongs to export (M4).
  */
 export function canonicalDecisionSnapshot(decisions: readonly Decision[]): string {
   return JSON.stringify(decisions.map((decision) => ({
@@ -298,7 +386,10 @@ export function canonicalDecisionSnapshot(decisions: readonly Decision[]): strin
     prerequisites: [...decision.prerequisites],
     status: decision.status,
     options: decision.options.map((option) => ({
-      id: option.id, label: option.label, consequence: option.consequence,
+      id: option.id,
+      label: option.label,
+      consequence: option.consequence,
+      unresolved: option.unresolved,
     })),
     answer: decision.answer
       ? { text: decision.answer.text, chosenOptionId: decision.answer.chosenOptionId, actor: decision.answer.actor }
@@ -316,12 +407,15 @@ export type LegacyMigrationPreview =
   | { kind: 'needs_review'; legacy: LegacySessionRecord; session: Session; reason: string; notes: string[] }
   | { kind: 'unavailable'; legacy?: LegacySessionRecord; reason: string };
 
-const UNDECIDED_LABEL = "i have not decided";
-
 /**
  * Builds a non-destructive preview of how an M0 record could become an M1
  * session. The original record is never mutated and is returned alongside the
  * preview so no information is lost.
+ *
+ * `value` is whatever the host store returned, not a trusted record: this
+ * function validates at its own boundary instead of assuming a caller already
+ * did. Unreadable input yields `unavailable`; a readable but contradictory
+ * record yields `needs_review`.
  *
  * - A real M0 answer becomes an `answered` decision.
  * - "I have not decided" becomes an `open` (unresolved) decision; the original
@@ -329,10 +423,24 @@ const UNDECIDED_LABEL = "i have not decided";
  * - An unanswered M0 record becomes an `open` decision.
  * - M0's dummy approval is NEVER carried into M1 approval metadata.
  *
+ * The produced session is checked against `readStoredSession` before it is
+ * returned, so a preview never hands out something v2 would reject.
+ *
  * M0 option lists are not stored in v1 records, so migrated decisions have an
  * empty `options` array. This limitation is reported in `notes`.
  */
-export function previewLegacyMigration(legacy: LegacySessionRecord): LegacyMigrationPreview {
+export function previewLegacyMigration(value: unknown): LegacyMigrationPreview {
+  const read = readStoredRecord(value);
+  if (read.kind !== 'ok') {
+    return {
+      kind: 'unavailable',
+      reason: read.kind === 'empty'
+        ? 'no legacy record is saved for this workspace'
+        : `the legacy record cannot be read: ${read.reason}`,
+    };
+  }
+
+  const legacy = read.record;
   const notes: string[] = [
     'M0 option labels and consequences are not stored in v1 records; migrated decision options are empty.',
     'M0 dummy approval is not carried into M1 approval metadata.',
@@ -342,8 +450,7 @@ export function previewLegacyMigration(legacy: LegacySessionRecord): LegacyMigra
   const questionText = legacy.answer?.question ?? 'Who is going to use this?';
   const now = legacy.updatedAt;
 
-  const isUndecided = legacy.answer !== undefined
-    && legacy.answer.answer.trim().toLowerCase() === UNDECIDED_LABEL;
+  const isUndecided = legacy.answer !== undefined && isUnresolvedAnswerText(legacy.answer.answer);
 
   const decisionStatus: DecisionStatus = (legacy.status === 'answered' && legacy.answer !== undefined && !isUndecided)
     ? 'answered'
@@ -373,6 +480,34 @@ export function previewLegacyMigration(legacy: LegacySessionRecord): LegacyMigra
     createdAt: legacy.createdAt,
     updatedAt: legacy.updatedAt,
   };
+
+  // The preview itself must satisfy the contract it feeds.
+  const check = readStoredSession(session);
+  if (check.kind !== 'ok') {
+    const why = check.kind === 'unreadable' ? check.reason : check.kind;
+    return { kind: 'unavailable', legacy, reason: `the converted session would not satisfy schema v2 (${why})` };
+  }
+
+  const contradictions: string[] = [];
+  if (legacy.status === 'awaiting_answer' && legacy.answer !== undefined) {
+    contradictions.push('it is marked as awaiting an answer but already carries one');
+  }
+  if (legacy.approvedAt !== undefined && legacy.answer === undefined) {
+    contradictions.push('it carries an approval but no answer to approve');
+  }
+  if (legacy.approvedAt !== undefined) {
+    notes.push('The M0 approval timestamp stays on the legacy record and is not promoted.');
+  }
+
+  if (contradictions.length > 0) {
+    return {
+      kind: 'needs_review',
+      legacy,
+      session,
+      reason: `The legacy record contradicts itself: ${contradictions.join('; ')}. The decision stays unresolved.`,
+      notes,
+    };
+  }
 
   if (isUndecided) {
     return {
