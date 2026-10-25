@@ -366,6 +366,23 @@ describe('needs_review retention', () => {
     assert.equal(isSettledDecision({ ...settledDecision, status: 'open' }), false);
     assert.equal(isSettledDecision(settledDecision), true);
   });
+
+  it('S1-19: an assumption is not user confirmation', () => {
+    // The schema still accepts `assumed` so later milestones can propose an
+    // assumption, but M1 gives it no settlement authority.
+    const assumed = { ...settledDecision, status: 'assumed' as const, answer: { text: 'Probably one team', actor: 'assumption' as const } };
+    assert.equal(isSettledDecision(assumed), false);
+    // It remains storable, so the decision is representable without being trusted.
+    assert.equal(readStoredSession({ ...validSession, decisions: [assumed] }).kind, 'ok');
+  });
+
+  it('S1-19b: an unconfirmed critical assumption cannot satisfy approval', () => {
+    const assumed = { ...settledDecision, status: 'assumed' as const, answer: { text: 'Probably one team', actor: 'assumption' as const } };
+    const result = readStoredSession(approvedSession([assumed]));
+    assert.equal(result.kind, 'unreadable');
+    if (result.kind !== 'unreadable') return;
+    assert.match(result.reason, /unresolved critical decision/);
+  });
 });
 
 describe('legacy M0 compatibility', () => {
