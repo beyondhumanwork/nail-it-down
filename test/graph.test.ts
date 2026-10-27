@@ -79,6 +79,45 @@ describe('M1 graph validation', () => {
     assert.match(cycle.detail, /cycle/);
   });
 
+  it('M1-01d: a two-decision cycle is reported once, not with a repeated start', () => {
+    const result = validateGraph([
+      decision('a', { prerequisites: ['b'] }),
+      decision('b', { prerequisites: ['a'] }),
+    ]);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    const cycle = result.problems.find((problem) => problem.kind === 'cycle');
+    assert.ok(cycle && cycle.kind === 'cycle');
+    // The stored path lists each decision exactly once; the closing edge is implicit.
+    assert.deepEqual(cycle.path, ['a', 'b']);
+    assert.equal(cycle.decisionId, cycle.path[0]);
+    // The human-readable diagnostic closes the loop exactly once.
+    assert.equal(cycle.detail, 'dependency cycle (a -> b -> a)');
+  });
+
+  it('M1-01e: a three-decision cycle stores each edge once and closes once', () => {
+    const result = validateGraph([
+      decision('a', { prerequisites: ['c'] }),
+      decision('b', { prerequisites: ['a'] }),
+      decision('c', { prerequisites: ['b'] }),
+    ]);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    const cycle = result.problems.find((problem) => problem.kind === 'cycle');
+    assert.ok(cycle && cycle.kind === 'cycle');
+    assert.deepEqual(cycle.path, ['a', 'c', 'b']);
+    assert.equal(cycle.decisionId, 'a');
+    assert.equal(cycle.detail, 'dependency cycle (a -> c -> b -> a)');
+  });
+
+  it('M1-01f: cycle detection is deterministic across repeated calls', () => {
+    const graph = [
+      decision('a', { prerequisites: ['b'] }),
+      decision('b', { prerequisites: ['a'] }),
+    ];
+    assert.deepEqual(validateGraph(graph), validateGraph(graph));
+  });
+
   it('M1-01b: rejects a longer cycle and a self-dependency', () => {
     const long = validateGraph([
       decision('a', { prerequisites: ['c'] }),
@@ -349,6 +388,53 @@ describe('M1 topological ordering', () => {
     assert.throws(
       () => topologicalOrder([decision('a', { prerequisites: ['b'] }), decision('b', { prerequisites: ['a'] })]),
       /cannot be ordered/,
+    );
+  });
+
+  it('M1-13e: rejects a missing prerequisite reference directly', () => {
+    // Called on its own: no caller-side validation, no prior validateGraph().
+    assert.throws(
+      () => topologicalOrder([decision('a', { prerequisites: ['ghost'] })]),
+      /cannot be ordered[\s\S]*not in the session/,
+    );
+  });
+
+  it('M1-13f: never silently drops a duplicate identifier', () => {
+    // The old implementation collapsed duplicate ids and returned a shorter
+    // order than its input, which looked like a valid result.
+    assert.throws(
+      () => topologicalOrder([decision('a'), decision('a', { question: 'Other?' })]),
+      /cannot be ordered[\s\S]*duplicate decision id/,
+    );
+  });
+
+  it('M1-13g: rejects a self-dependency directly', () => {
+    assert.throws(
+      () => topologicalOrder([decision('a', { prerequisites: ['a'] })]),
+      /cannot be ordered[\s\S]*lists itself/,
+    );
+  });
+
+  it('M1-13h: reports every structural fault in the ordering error', () => {
+    let message = '';
+    try {
+      topologicalOrder([
+        decision('a', { prerequisites: ['ghost'] }),
+        decision('b', { prerequisites: ['b'] }),
+      ]);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    assert.match(message, /not in the session/);
+    assert.match(message, /lists itself/);
+  });
+
+  it('M1-13i: rejects non-graph input and still orders valid graphs', () => {
+    assert.throws(() => topologicalOrder({} as unknown as Decision[]), /cannot be ordered/);
+    // A valid graph is unaffected by the added validation step.
+    assert.deepEqual(
+      ids(topologicalOrder([answered('root'), decision('d2', { prerequisites: ['root'] })])),
+      ['root', 'd2'],
     );
   });
 

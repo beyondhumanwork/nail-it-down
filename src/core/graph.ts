@@ -79,6 +79,14 @@ export type GraphProblem =
   | { kind: 'missing-prerequisite'; decisionId: string; prerequisiteId: string; detail: string }
   | { kind: 'self-dependency'; decisionId: string; detail: string }
   | { kind: 'duplicate-prerequisite'; decisionId: string; prerequisiteId: string; detail: string }
+  /**
+   * `path` lists each decision in the cycle exactly once, in traversal order,
+   * starting at the entry point where the cycle was detected. The cycle is
+   * closed by an implicit edge from the last element back to the first, so it
+   * is never repeated at the end: a two-decision cycle stores `[A, B]`, not
+   * `[A, B, A]`. `decisionId` always equals `path[0]`, and `path.length` is the
+   * number of decisions in the cycle. `detail` closes the loop for display.
+   */
   | { kind: 'cycle'; decisionId: string; path: string[]; detail: string };
 
 export type GraphValidation = { ok: true } | { ok: false; problems: GraphProblem[] };
@@ -100,10 +108,16 @@ export function describeGraphProblem(problem: GraphProblem): string {
  * Validates the dependency structure of a decision list.
  *
  * Returns every problem found rather than the first, so a caller can report all
- * of them at once. Never repairs or reorders anything: an invalid graph stays
- * invalid and the caller decides what to do about it. Problems are reported in
- * source array order (and, within a decision, in prerequisite order), so the
- * output is deterministic.
+ * of them at once — with one deliberate exception: only the **first** cycle
+ * detected is reported, not every cycle in the graph. Finding all cycles is
+ * exponential in the worst case and buys nothing here, since one cycle is
+ * already enough to reject the graph. Do not read the absence of further cycle
+ * entries as evidence that none exist.
+ *
+ * Never repairs or reorders anything: an invalid graph stays invalid and the
+ * caller decides what to do about it. Problems are reported in source array
+ * order (and, within a decision, in prerequisite order), so the output is
+ * deterministic.
  *
  * An empty list is valid — a session may legitimately have no decisions.
  */
@@ -246,7 +260,10 @@ function findCycle(decisions: readonly unknown[]): string[] | undefined {
     if (current === 'done') return undefined;
     if (current === 'visiting') {
       const start = stack.indexOf(id);
-      return [...stack.slice(start), id];
+      // Each decision once: the closing edge back to `id` is implicit, so the
+      // entry point is not repeated at the end (that repeat was the bug that
+      // rendered `A -> B -> A -> A` downstream).
+      return stack.slice(start);
     }
     state.set(id, 'visiting');
     stack.push(id);
@@ -382,7 +399,17 @@ export function descendants(
  * cannot be ordered rather than returning a silently partial result.
  */
 export function topologicalOrder(decisions: readonly Decision[]): Decision[] {
-  const byId = new Map(decisions.map((decision) => [decision.id, decision]));
+  // Ordering is only meaningful for a structurally sound graph. A missing
+  // prerequisite used to be treated as already satisfied, which let a broken
+  // graph produce a plausible-looking order; duplicate ids silently dropped a
+  // decision from the result. Validate first and reject instead.
+  const validation = validateGraph(decisions);
+  if (!validation.ok) {
+    throw new Error(
+      `the decision graph cannot be ordered (${validation.problems.map(describeGraphProblem).join('; ')})`,
+    );
+  }
+
   const remaining = new Set(decisions.map((decision) => decision.id));
   const ordered: Decision[] = [];
 
@@ -391,13 +418,14 @@ export function topologicalOrder(decisions: readonly Decision[]): Decision[] {
     const next = decisions.find(
       (decision) =>
         remaining.has(decision.id) &&
-        decision.prerequisites.every(
-          (prerequisite) => !byId.has(prerequisite) || !remaining.has(prerequisite),
-        ),
+        decision.prerequisites.every((prerequisite) => !remaining.has(prerequisite)),
     );
     if (next === undefined) {
+      // Unreachable once the graph validates: acyclic, unique ids and complete
+      // references always admit an order. Kept as a backstop so this can never
+      // return a partial order.
       const stuck = decisions.filter((decision) => remaining.has(decision.id)).map((d) => d.id);
-      throw new Error(`the decision graph cannot be ordered (cycle among ${stuck.join(', ')})`);
+      throw new Error(`the decision graph cannot be ordered (stuck among ${stuck.join(', ')})`);
     }
     remaining.delete(next.id);
     ordered.push(next);
