@@ -4,9 +4,9 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha**. M0 and M1 are merged and M1 passed scoped technical acceptance (`docs/M1_ACCEPTANCE.md`). **M2 Slice 1 only** (host-independent, synthetic-fixture bounded discovery policy/evidence core) is authorized under `docs/M2_SLICE1_CONTRACT.md`; no live repository reads, host integration, M2 later slices, models, CI or release are authorized. The complete v0.1 product remains a draft and not publicly installable. M0-09 and M1 limitations remain recorded.
+- Current phase: **pre-alpha**. M0 and M1 are merged, with M1 technically accepted (`docs/M1_ACCEPTANCE.md`); M2 Slice 1 is merged. **M2 Slice 2 only** is authorized for an isolated OS-backed reader and default-deny consent helper tested **exclusively on disposable synthetic workspaces** under `docs/M2_SLICE2_CONTRACT.md`. No runtime reads of real user/project repositories, `/naildown` filesystem wiring, M2 Slice 3+, model calls, CI, or release are authorized. v0.1 remains draft/not publicly installable. Prior M0/M1 limitations remain.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
-- The full PRD and broader architecture remain **proposed**. The accepted implementation contract covers M0 and M1; only the bounded **M2 Slice 1** contract has additional authorization. See `docs/M2_SLICE1_CONTRACT.md`, `docs/M1_ACCEPTANCE.md`, `docs/M0_ACCEPTANCE.md`, and `docs/ROADMAP.md`. Do not treat proposed repository/model access, exports or later milestones as authorized.
+- The full PRD and broader architecture remain **proposed**. Accepted implementation covers M0, M1 and bounded M2 Slice 1; **M2 Slice 2 is only authorized for isolated synthetic-root feasibility**, not production repo access. See `docs/M2_SLICE2_CONTRACT.md`, `docs/M2_SLICE1_CONTRACT.md`, `docs/M1_ACCEPTANCE.md`, and `docs/ROADMAP.md`. Do not treat proposed model access, persistence of evidence, exports, or later milestones as authorized.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
 
 ## Scope and architecture
