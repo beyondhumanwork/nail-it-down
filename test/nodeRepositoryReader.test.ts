@@ -1,7 +1,9 @@
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import fsDefault from 'node:fs';
 import * as fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -189,6 +191,92 @@ describe('OS reader: path policy before OS access', () => {
     assert.deepEqual(READABLE_NAMES, [
       'README.md', 'AGENTS.md', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'tsconfig.json',
     ]);
+  });
+
+  it('does not stat or open forbidden and unknown directory entries', () => {
+    const root = workspace({
+      'README.md': '# safe',
+      '.env': 'synthetic-secret',
+      'credentials.json': '{"token":"synthetic-secret"}',
+      'private.pem': 'synthetic-secret',
+      'unknown-note.txt': 'synthetic-secret',
+    });
+    const reader = readerFor(root);
+    const candidatePaths = new Set([
+      '.env', 'credentials.json', 'private.pem', 'unknown-note.txt',
+    ].map((name) => nodePath.join(fs.realpathSync(root), name)));
+    const touched: string[] = [];
+    const originalLstat = fsDefault.lstatSync;
+    const originalStat = fsDefault.statSync;
+    const originalRealpath = fsDefault.realpathSync;
+    const originalAccess = fsDefault.accessSync;
+    const originalOpen = fsDefault.openSync;
+    const originalReadFile = fsDefault.readFileSync;
+    const originalRead = fsDefault.readSync;
+    const candidateDescriptors = new Set<number>();
+    // The ESM default export types its members as read-only; patch through a
+    // view that mirrors the same signatures so the swap is type-checkable.
+    const patchable = fsDefault as unknown as {
+      lstatSync: typeof fsDefault.lstatSync;
+      statSync: typeof fsDefault.statSync;
+      realpathSync: typeof fsDefault.realpathSync;
+      accessSync: typeof fsDefault.accessSync;
+      openSync: typeof fsDefault.openSync;
+      readFileSync: typeof fsDefault.readFileSync;
+      readSync: typeof fsDefault.readSync;
+    };
+
+    try {
+      patchable.lstatSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (candidatePaths.has(String(path))) touched.push(String(path));
+        return (originalLstat as (...values: unknown[]) => unknown)(path, ...args);
+      }) as typeof fsDefault.lstatSync;
+      patchable.statSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (candidatePaths.has(String(path))) touched.push(String(path));
+        return (originalStat as (...values: unknown[]) => unknown)(path, ...args);
+      }) as typeof fsDefault.statSync;
+      patchable.realpathSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (candidatePaths.has(String(path))) touched.push(String(path));
+        return (originalRealpath as (...values: unknown[]) => unknown)(path, ...args);
+      }) as typeof fsDefault.realpathSync;
+      patchable.accessSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (candidatePaths.has(String(path))) touched.push(String(path));
+        return (originalAccess as (...values: unknown[]) => unknown)(path, ...args);
+      }) as typeof fsDefault.accessSync;
+      patchable.openSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        const descriptor = (originalOpen as (...values: unknown[]) => number)(path, ...args);
+        if (candidatePaths.has(String(path))) {
+          touched.push(String(path));
+          candidateDescriptors.add(descriptor);
+        }
+        return descriptor;
+      }) as typeof fsDefault.openSync;
+      patchable.readFileSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (candidatePaths.has(String(path))) touched.push(String(path));
+        return (originalReadFile as (...values: unknown[]) => unknown)(path, ...args);
+      }) as typeof fsDefault.readFileSync;
+      patchable.readSync = ((descriptor: number, ...args: unknown[]) => {
+        if (candidateDescriptors.has(descriptor)) touched.push(`fd:${descriptor}`);
+        return (originalRead as (...values: unknown[]) => number)(descriptor, ...args);
+      }) as typeof fsDefault.readSync;
+      syncBuiltinESMExports();
+
+      const entries = reader.list('');
+      assert.ok(entries.length > 0);
+      assert.deepEqual(touched, []);
+      const selection = selectCandidates({ reader, consent: CONSENT });
+      assert.equal(selection.kind, 'selected');
+      assert.deepEqual(touched, []);
+    } finally {
+      patchable.lstatSync = originalLstat;
+      patchable.statSync = originalStat;
+      fsDefault.realpathSync = originalRealpath;
+      fsDefault.accessSync = originalAccess;
+      fsDefault.openSync = originalOpen;
+      fsDefault.readFileSync = originalReadFile;
+      fsDefault.readSync = originalRead;
+      syncBuiltinESMExports();
+    }
   });
 
   it('does not enumerate nested directories', () => {
@@ -386,6 +474,24 @@ describe('OS reader: budgets on actual bytes', () => {
     }
   });
 
+  it('refuses a same-inode, same-length rewrite after listing', () => {
+    const root = workspace({ 'README.md': '# original' });
+    const reader = readerFor(root);
+    const path = nodePath.join(root, 'README.md');
+    const before = fs.statSync(path, { bigint: true });
+    reader.list('');
+    fs.writeFileSync(path, '# replaced');
+    const after = fs.statSync(path, { bigint: true });
+    assert.equal(after.ino, before.ino, 'fixture must rewrite the same inode');
+    assert.equal(after.size, before.size, 'fixture must retain the same byte length');
+    assert.ok(after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs,
+      'filesystem must expose a change timestamp for the deterministic rewrite');
+
+    const result = reader.read('README.md');
+    assert.equal(result.kind, 'unreadable');
+    if (result.kind === 'unreadable') assert.equal(result.reason, 'file-changed');
+  });
+
   it('bounds directory enumeration at the cap and reports 100 versus 101', () => {
     const hundred = workspace({ 'README.md': '# hi' });
     for (let index = 0; index < 99; index += 1) {
@@ -406,6 +512,58 @@ describe('OS reader: budgets on actual bytes', () => {
     const refused = selectCandidates({ reader: readerFor(overCap), consent: CONSENT });
     assert.equal(refused.kind, 'refused');
     if (refused.kind === 'refused') assert.equal(refused.refusal.reason, 'too-many-directory-entries');
+  });
+
+  it('invalidates prior listing authorization after an over-limit relist', () => {
+    const root = workspace({ 'README.md': '# hi' });
+    const reader = readerFor(root);
+    reader.list('');
+    for (let index = 0; index < DEFAULT_BUDGET.maxDirectoryEntries; index += 1) {
+      fs.writeFileSync(nodePath.join(root, `overflow-${index}.txt`), 'x');
+    }
+
+    assert.equal(reader.list('').length, DEFAULT_BUDGET.maxDirectoryEntries + 1);
+    const result = reader.read('README.md');
+    assert.equal(result.kind, 'unreadable');
+    if (result.kind === 'unreadable') assert.equal(result.reason, 'not-listed');
+  });
+
+  it('invalidates prior authorization when a later enumeration fails', (t) => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      t.diagnostic('running as root: unreadable-directory case NOT VERIFIED');
+      return;
+    }
+    const root = workspace({ 'README.md': '# hi' });
+    const reader = readerFor(root);
+    // A good listing first, so there is authorization to invalidate.
+    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+
+    // 0o000 on the directory makes opendir fail for a non-root process.
+    fs.chmodSync(root, 0o000);
+    try {
+      assert.deepEqual(reader.list(''), [], 'a failed enumeration yields nothing');
+      const blocked = reader.read('README.md');
+      assert.equal(blocked.kind, 'unreadable');
+      if (blocked.kind === 'unreadable') assert.equal(blocked.reason, 'not-listed');
+    } finally {
+      fs.chmodSync(root, 0o755);
+    }
+
+    // With access restored, only a fresh listing re-authorizes the read.
+    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+    assert.equal(reader.read('README.md').kind, 'ok');
+  });
+
+  it('invalidates removed-file authorization after a successful relist', () => {
+    const root = workspace({ 'README.md': '# hi' });
+    const reader = readerFor(root);
+    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+    fs.rmSync(nodePath.join(root, 'README.md'));
+
+    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), false);
+    const result = reader.read('README.md');
+    assert.equal(result.kind, 'unreadable');
+    if (result.kind === 'unreadable') assert.equal(result.reason, 'not-listed');
   });
 });
 
@@ -446,7 +604,7 @@ describe('OS reader: errors are classified, never echoed', () => {
     const allowed = new Set([
       'path-not-permitted', 'not-listed', 'root-replaced', 'platform-unsupported',
       'symlink-not-permitted', 'not-a-regular-file', 'permission-denied', 'file-too-large',
-      'size-changed', 'file-replaced', 'too-many-open-files', 'io-error',
+      'size-changed', 'file-replaced', 'file-changed', 'too-many-open-files', 'io-error',
     ]);
     const root = workspace({ 'README.md': '# hi' });
     const reader = readerFor(root);

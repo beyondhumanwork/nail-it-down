@@ -108,12 +108,46 @@ export const READ_OPEN_FLAGS: OpenFlagSet = resolveOpenFlags();
  * `lstat`, never `stat`: the point is to describe the directory entry, and
  * following a symlink here would defeat the identity comparison later.
  */
-function identityOf(stats: fs.Stats): FileIdentity {
-  return { dev: stats.dev, ino: stats.ino };
+function identityOf(stats: fs.Stats | fs.BigIntStats): FileIdentity {
+  return {
+    dev: typeof stats.dev === 'bigint' ? Number(stats.dev) : stats.dev,
+    ino: typeof stats.ino === 'bigint' ? Number(stats.ino) : stats.ino,
+  };
 }
 
 function sameIdentity(a: FileIdentity, b: FileIdentity): boolean {
   return a.dev === b.dev && a.ino === b.ino;
+}
+
+type FileVersion = {
+  identity: FileIdentity;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+};
+
+/**
+ * Node exposes filesystem timestamps as bigint nanoseconds, which avoids
+ * rounding them in this comparison. The value's effective precision is still
+ * the underlying filesystem's: a coarse filesystem can give two rapid writes
+ * identical timestamps. Comparing mtime and ctime before/after bounded reads
+ * detects many same-inode rewrites, but no lock is held and concurrent writes
+ * cannot be ruled out. This is a consistency check, not race-free containment.
+ */
+function fileVersionOf(stats: fs.BigIntStats): FileVersion {
+  return {
+    identity: identityOf(stats),
+    size: stats.size,
+    mtimeNs: stats.mtimeNs,
+    ctimeNs: stats.ctimeNs,
+  };
+}
+
+function sameFileVersion(a: FileVersion, b: FileVersion): boolean {
+  return sameIdentity(a.identity, b.identity)
+    && a.size === b.size
+    && a.mtimeNs === b.mtimeNs
+    && a.ctimeNs === b.ctimeNs;
 }
 
 /**
@@ -229,6 +263,7 @@ export type ReadFailureReason =
   | 'file-too-large'
   | 'size-changed'
   | 'file-replaced'
+  | 'file-changed'
   | 'too-many-open-files'
   | 'io-error';
 
@@ -293,8 +328,7 @@ export type NodeReaderResult =
 
 type ListedEntry = {
   kind: EntryKind;
-  identity?: FileIdentity;
-  size?: number;
+  version?: FileVersion;
 };
 
 const READ_CHUNK_BYTES = 8 * 1024;
@@ -354,8 +388,10 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
   }
 
   function listRoot(): readonly ReaderEntry[] {
+    // A new listing attempt replaces the prior authorization, including when
+    // this attempt fails before it can enumerate a single entry.
+    listed.clear();
     if (!rootUnchanged()) {
-      listed.clear();
       return [];
     }
 
@@ -373,6 +409,16 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
         if (dirent === null) break;
 
         const path = dirent.name;
+        // Apply the Slice 1 path policy before candidate-specific metadata
+        // access. Unknown and forbidden entries still count toward the bounded
+        // scan and retain their names for collision handling, but are never
+        // statted, resolved, or opened.
+        const inspection = inspectCandidatePath(path);
+        if (!inspection.ok) {
+          entries.push({ path, kind: 'other' });
+          continue;
+        }
+
         if (dirent.isSymbolicLink()) {
           // Reported, never followed, and no target text is surfaced.
           entries.push({ path, kind: 'symlink' });
@@ -390,17 +436,17 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
           continue;
         }
 
-        // Identity and size are captured here so the later read can prove it
-        // opened the same inode at the same size.
+        // Identity, size and change timestamps are captured here so the later
+        // read can compare the opened descriptor with this listing snapshot.
         try {
-          const stats = fs.lstatSync(nodePath.join(canonicalRoot, path));
+          const stats = fs.lstatSync(nodePath.join(canonicalRoot, path), { bigint: true });
           if (!stats.isFile()) {
             entries.push({ path, kind: 'other' });
             listed.set(path, { kind: 'other' });
             continue;
           }
-          entries.push({ path, kind: 'file', size: stats.size });
-          listed.set(path, { kind: 'file', identity: identityOf(stats), size: stats.size });
+          entries.push({ path, kind: 'file', size: Number(stats.size) });
+          listed.set(path, { kind: 'file', version: fileVersionOf(stats) });
         } catch {
           entries.push({ path, kind: 'other' });
           listed.set(path, { kind: 'other' });
@@ -420,6 +466,10 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
         }
       }
     }
+
+    // The core refuses a 101-entry listing. Do not leave the allowed entries
+    // encountered before the overflow authorized for a later direct read.
+    if (entries.length > DEFAULT_BUDGET.maxDirectoryEntries) listed.clear();
 
     return entries;
   }
@@ -450,9 +500,9 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     }
 
     try {
-      let stats: fs.Stats;
+      let stats: fs.BigIntStats;
       try {
-        stats = fs.fstatSync(descriptor);
+        stats = fs.fstatSync(descriptor, { bigint: true });
       } catch (error) {
         return classifyOpenError(error);
       }
@@ -461,12 +511,16 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
       // swapped in after the listing fail rather than be followed.
       if (!stats.isFile()) return refuse('not-a-regular-file');
 
-      if (expectation.identity !== undefined && !sameIdentity(identityOf(stats), expectation.identity)) {
+      const openedVersion = fileVersionOf(stats);
+      if (expectation.version !== undefined && !sameIdentity(openedVersion.identity, expectation.version.identity)) {
         return refuse('file-replaced');
       }
-      if (stats.size > maxFileBytes) return refuse('file-too-large');
-      if (expectation.size !== undefined && stats.size !== expectation.size) {
+      if (stats.size > BigInt(maxFileBytes)) return refuse('file-too-large');
+      if (expectation.version !== undefined && stats.size !== expectation.version.size) {
         return refuse('size-changed');
+      }
+      if (expectation.version !== undefined && !sameFileVersion(openedVersion, expectation.version)) {
+        return refuse('file-changed');
       }
 
       // Read at most cap + 1 bytes, so an oversized file is detected without
@@ -494,15 +548,19 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
       // Any disagreement about how big the file is means the bytes we hold are
       // not the file that was measured. Refuse rather than present a partial
       // read as a complete source.
-      if (total !== stats.size) return refuse('size-changed');
-      let after: fs.Stats;
+      if (BigInt(total) !== stats.size) return refuse('size-changed');
+      let after: fs.BigIntStats;
       try {
-        after = fs.fstatSync(descriptor);
+        after = fs.fstatSync(descriptor, { bigint: true });
       } catch (error) {
         return classifyOpenError(error);
       }
-      if (after.size !== stats.size || !sameIdentity(identityOf(after), identityOf(stats))) {
-        return refuse('size-changed');
+      const afterVersion = fileVersionOf(after);
+      if (!sameIdentity(afterVersion.identity, openedVersion.identity)) return refuse('file-replaced');
+      if (afterVersion.size !== openedVersion.size) return refuse('size-changed');
+      if (!sameFileVersion(afterVersion, openedVersion)
+        || (expectation.version !== undefined && !sameFileVersion(afterVersion, expectation.version))) {
+        return refuse('file-changed');
       }
 
       return { kind: 'ok', bytes: new Uint8Array(Buffer.concat(chunks, total)) };
@@ -521,7 +579,10 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     list(relativeDir: string): readonly ReaderEntry[] {
       // Root-only enumeration. A nested request yields nothing, so there is no
       // code path here that walks a tree.
-      if (relativeDir !== '') return [];
+      if (relativeDir !== '') {
+        listed.clear();
+        return [];
+      }
       return listRoot();
     },
     read(relativePath: string): ReadOutcome {
