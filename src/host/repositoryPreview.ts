@@ -25,6 +25,7 @@ import type { ConsentRefusalReason } from './repositoryConsent.ts';
 import { createNodeRepositoryReader } from './nodeRepositoryReader.ts';
 import type { RootRejection } from './nodeRepositoryReader.ts';
 import {
+  DEFAULT_BUDGET,
   DEPENDENCY_SECTIONS,
   absenceInBoundedScan,
   declaredDependencyEvidence,
@@ -34,8 +35,11 @@ import {
 } from '../core/discovery.ts';
 import type {
   ConsentDecision,
+  DiscoveryBudget,
   Evidence,
   ProvenanceState,
+  ReadOutcome,
+  ReaderEntry,
   RejectionReason,
   RepositoryReader,
 } from '../core/discovery.ts';
@@ -128,22 +132,67 @@ function dependencyNamesFrom(manifestText: string): string[] {
 }
 
 /**
- * Wraps a reader so each physical operation happens at most once per preview.
+ * Wraps a reader so each physical operation happens at most once per preview,
+ * and so the aggregate byte ceiling is enforced *before* a file is opened.
  *
- * Why this exists: the core re-runs selection every time it is asked for a
+ * Why the cache exists: the core re-runs selection every time it is asked for a
  * citation, so an uncached preview of two dependencies performed three
  * selections and therefore three passes over the same bytes. That made the
  * disclosed 96 KiB ceiling a per-selection figure rather than a per-invocation
  * one. With this wrapper the aggregate read volume is exactly one selection's
  * worth, and adding citations cannot extend it.
  *
+ * Why the ceiling is here and not in the core: `selectCandidates` checks
+ * `totalBytes + bytes > maxTotalBytes` only *after* asking for the bytes, so on
+ * its own it reads every candidate even when it will throw most of them away.
+ * Six permitted files of 20 KiB are individually valid and collectively over the
+ * ceiling; without this guard all six are physically read to keep four.
+ *
+ * Budgeting against the *listed* size is sound only because the OS reader
+ * refuses a file whose descriptor no longer matches the size captured at
+ * listing, before it reads a single byte. A file that grows after the listing is
+ * therefore rejected with zero bytes read rather than silently overspending. A
+ * reader that does not hold that property is caught here by comparing what it
+ * returned against what it listed, after which the invocation fails closed: one
+ * unaccounted read is a bug, and risking a second is not worth it.
+ *
  * It caches raw read outcomes, nothing else. Every policy decision — which paths
  * are allowed, what the budgets are, whether a fact is substantiated — is still
  * made by the core on every call; this only avoids re-fetching the same bytes.
  */
-function snapshotReader(base: RepositoryReader): RepositoryReader {
-  const listings = new Map<string, readonly ReturnType<RepositoryReader['list']>[number][]>();
-  const reads = new Map<string, ReturnType<RepositoryReader['read']>>();
+// Exported so the tests can pin the fail-closed branches a well-behaved reader
+// never reaches. Production callers treat it as internal.
+export function snapshotReader(
+  base: RepositoryReader,
+  budget: DiscoveryBudget,
+  onCeilingRefusal?: (relativePath: string) => void,
+): RepositoryReader {
+  const listings = new Map<string, readonly ReaderEntry[]>();
+  const reads = new Map<string, ReadOutcome>();
+  let bytesRead = 0;
+  let untrusted = false;
+
+  const listedSize = (relativePath: string): number | undefined => {
+    for (const entries of listings.values()) {
+      const found = entries.find((entry) => entry.path === relativePath);
+      if (found !== undefined) return found.size;
+    }
+    return undefined;
+  };
+
+  /** `undefined` admits the read; otherwise the file is refused without opening it. */
+  const admission = (relativePath: string): ReadOutcome | undefined => {
+    const exhausted: ReadOutcome = { kind: 'unreadable', reason: 'preview read ceiling reached' };
+    if (untrusted) return exhausted;
+    const remaining = budget.maxTotalBytes - bytesRead;
+    const claimed = listedSize(relativePath);
+    // A listed size is exactly what this reader will hand over, so it can be
+    // budgeted against precisely.
+    if (claimed !== undefined) return claimed > remaining ? exhausted : undefined;
+    // Nothing to budget against: admit only if even the largest file the policy
+    // permits would still fit, so the worst case cannot overspend.
+    return remaining < budget.maxFileBytes ? exhausted : undefined;
+  };
 
   return {
     list(relativeDir: string) {
@@ -156,7 +205,23 @@ function snapshotReader(base: RepositoryReader): RepositoryReader {
     read(relativePath: string) {
       const cached = reads.get(relativePath);
       if (cached !== undefined) return cached;
+
+      const refused = admission(relativePath);
+      if (refused !== undefined) {
+        // The reader interface has no "over budget" outcome, so the core would
+        // label this `unreadable`. Report the real reason instead of letting a
+        // precise refusal decay into a vague one.
+        onCeilingRefusal?.(relativePath);
+        reads.set(relativePath, refused);
+        return refused;
+      }
+
       const fresh = base.read(relativePath);
+      if (fresh.kind === 'ok') {
+        bytesRead += fresh.bytes.length;
+        const claimed = listedSize(relativePath);
+        if (claimed !== undefined && fresh.bytes.length !== claimed) untrusted = true;
+      }
       reads.set(relativePath, fresh);
       return fresh;
     },
@@ -206,7 +271,8 @@ export async function runRepositoryPreview(input: PreviewInput): Promise<Preview
   const decision: ConsentDecision = { granted: true, obtainedBy: 'preview consent dialog' };
   // One snapshot for the whole invocation: the first selection fetches the
   // bytes, and every later evidence call re-derives from the same capture.
-  const reader = snapshotReader(opened.reader);
+  const ceilingRefused = new Set<string>();
+  const reader = snapshotReader(opened.reader, DEFAULT_BUDGET, (path) => ceilingRefused.add(path));
   const selection = selectCandidates({ reader, consent: decision });
 
   if (selection.kind === 'refused') {
@@ -224,7 +290,9 @@ export async function runRepositoryPreview(input: PreviewInput): Promise<Preview
   }));
   const skipped: PreviewSkipped[] = selection.rejected.map((entry) => ({
     path: entry.path,
-    reason: entry.reason,
+    // The guard refused this one before opening it, so the honest reason is the
+    // ceiling, not the generic "unreadable" the core had to fall back to.
+    reason: ceilingRefused.has(entry.path) ? 'total-too-large' : entry.reason,
   }));
 
   // Citations come from the core only. If the manifest is absent, malformed or

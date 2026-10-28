@@ -12,10 +12,11 @@ import {
   renderPreview,
   reverifyPreviewEvidence,
   runRepositoryPreview,
+  snapshotReader,
 } from '../src/host/repositoryPreview.ts';
 import { CONSENT_LABELS } from '../src/host/repositoryConsent.ts';
 import { DEFAULT_BUDGET, declaredDependencyEvidence, selectCandidates } from '../src/core/discovery.ts';
-import type { ConsentDecision } from '../src/core/discovery.ts';
+import type { ConsentDecision, RepositoryReader } from '../src/core/discovery.ts';
 import { createNodeRepositoryReader } from '../src/host/nodeRepositoryReader.ts';
 import type { ModUi } from '../src/host/modApi.ts';
 import previewMod from './previewMod.ts';
@@ -723,5 +724,201 @@ describe('preview: rendering', () => {
     const result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
     const text = renderPreview(result);
     assert.match(text, /package\.json lines? \d+(?:-\d+)?:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Correction D: the aggregate ceiling is enforced before a file is opened.
+//
+// `selectCandidates` checks the running total only *after* it has asked for the
+// bytes, so six individually valid files can be read in full while only four are
+// kept. These tests count real filesystem calls, not the policy's own numbers.
+// ---------------------------------------------------------------------------
+
+describe('correction D: the aggregate byte ceiling bounds physical reads', () => {
+  const LINE = 'The quick brown fox jumps over the lazy dog. ';
+  const BIG = LINE.repeat(455);           // 20_475 bytes: valid alone, 5 of them are not
+  const MANIFEST = (deps: Record<string, string>): string =>
+    JSON.stringify({ name: 'over', dependencies: deps }, null, 2);
+
+  /**
+   * Five permitted files at 20_475 bytes plus a manifest: 102 KiB in total, well
+   * over the 96 KiB ceiling, while every individual file is inside the 32 KiB one.
+   * Candidate order is README, AGENTS, package.json, Cargo.toml, go.mod, tsconfig.
+   */
+  function overBudgetProject(deps: Record<string, string>): { parent: string; root: string } {
+    return project({
+      'README.md': BIG,
+      'AGENTS.md': BIG,
+      'package.json': MANIFEST(deps),
+      'Cargo.toml': BIG,
+      'go.mod': BIG,
+      'tsconfig.json': BIG,
+    });
+  }
+
+  const totalOf = (files: readonly { bytes: number }[]): number =>
+    files.reduce((sum, file) => sum + file.bytes, 0);
+
+  it('reads only the bytes it keeps, and never opens the over-budget file', async () => {
+    const { parent, root } = overBudgetProject({ alpha: '1.0.0', beta: '1.0.0' });
+
+    let result: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    const io = await countPhysicalIo(root, async () => {
+      result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
+    });
+
+    assert.equal(result?.kind, 'inspected');
+    if (result?.kind !== 'inspected') return;
+
+    // The decisive invariant: every physically read byte was retained as evidence
+    // and every retained file was opened exactly once. Under-counting bytes or
+    // over-reading candidates both break it.
+    assert.equal(io.bytes, totalOf(result.files), 'physical bytes must equal the bytes kept');
+    assert.ok(io.bytes <= DEFAULT_BUDGET.maxTotalBytes, `read ${io.bytes} bytes, over the ceiling`);
+    assert.equal(io.opens, result.files.length, 'one open per retained file, and none for the rest');
+
+    // The file that did not fit is refused without being read at all.
+    const refused = result.skipped.find((entry) => entry.path === 'tsconfig.json');
+    assert.ok(refused !== undefined, 'the over-budget file must be reported as skipped');
+    // Not "unreadable": the guard refused it before opening, and the preview
+    // reports the real reason rather than the core's generic fallback.
+    assert.equal(refused?.reason, 'total-too-large');
+    assert.ok(!result.files.some((file) => file.path === 'tsconfig.json'));
+
+    // 102 KiB of candidates, and only four large files plus the manifest were kept.
+    assert.equal(result.files.length, 5);
+    assert.equal(result.declarations.length, 2, 'within-budget manifests still yield citations');
+  });
+
+  it('does not open more files when more citations are requested', async () => {
+    const one = overBudgetProject({ alpha: '1.0.0' });
+    const four = overBudgetProject({ alpha: '1.0.0', beta: '1.0.0', gamma: '1.0.0', delta: '1.0.0' });
+
+    let oneResult: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    const oneIo = await countPhysicalIo(one.root, async () => {
+      oneResult = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root: one.root, permittedParent: one.parent });
+    });
+
+    let fourResult: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    const fourIo = await countPhysicalIo(four.root, async () => {
+      fourResult = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root: four.root, permittedParent: four.parent });
+    });
+
+    assert.equal(oneResult?.kind, 'inspected');
+    assert.equal(fourResult?.kind, 'inspected');
+    if (fourResult?.kind !== 'inspected') return;
+
+    assert.equal(fourResult.declarations.length, 2, 'the display cap is still two');
+    assert.equal(oneIo.opens, fourIo.opens, 'the same files are opened');
+    assert.equal(fourIo.bytes, totalOf(fourResult.files));
+    assert.ok(fourIo.bytes <= DEFAULT_BUDGET.maxTotalBytes);
+  });
+
+  it('refuses without reading when consent is withheld', async () => {
+    const { parent, root } = overBudgetProject({ alpha: '1.0.0' });
+
+    for (const answer of [undefined, CONSENT_LABELS.refuse]) {
+      let result: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+      const io = await countPhysicalIo(root, async () => {
+        result = await runRepositoryPreview({ ui: ui(answer), root, permittedParent: parent });
+      });
+      assert.equal(result?.kind, 'refused');
+      assert.deepEqual(io, { opens: 0, lists: 0, bytes: 0, meta: 0 }, 'nothing may be touched');
+    }
+  });
+
+  it('cannot be bypassed by a file that grows between listing and open', async () => {
+    const { parent, root } = overBudgetProject({ alpha: '1.0.0', beta: '1.0.0' });
+    // The reader joins onto its realpath'd root, so compare against that: on
+    // macOS the temp dir is a /var -> /private/var symlink and a comparison
+    // against the un-resolved path silently never matches.
+    const target = nodePath.join(fs.realpathSync(root), 'Cargo.toml');
+
+    // Grow the file after it was listed but before the reader opens it. Truncate
+    // extends in place without going through the patched openSync, so the growth
+    // itself is not counted as preview work. The OS reader must notice that the
+    // descriptor no longer matches the listed size and refuse before reading.
+    const growOnOpen = (): (() => void) => {
+      const saved = fsDefault.openSync;
+      let grown = false;
+      (fsDefault as { openSync: typeof fsDefault.openSync }).openSync = ((path: fs.PathLike, ...args: unknown[]) => {
+        if (!grown && String(path) === target) {
+          grown = true;
+          fs.truncateSync(target, BIG.length + 5_000);
+        }
+        return (saved as (...values: unknown[]) => number)(path, ...args);
+      }) as typeof fsDefault.openSync;
+      syncBuiltinESMExports();
+      return () => {
+        (fsDefault as { openSync: typeof fsDefault.openSync }).openSync = saved;
+        syncBuiltinESMExports();
+      };
+    };
+
+    const restore = growOnOpen();
+    let result: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    let io = { opens: 0, lists: 0, bytes: 0, meta: 0 };
+    try {
+      io = await countPhysicalIo(root, async () => {
+        result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
+      });
+    } finally {
+      restore();
+    }
+
+    assert.equal(result?.kind, 'inspected');
+    if (result?.kind !== 'inspected') return;
+
+    // The grown file contributed nothing: it was refused as size-changed before a
+    // single byte was read, so the ceiling still holds and the invariant survives.
+    assert.ok(!result.files.some((file) => file.path === 'Cargo.toml'), 'a changed file is not evidence');
+    assert.ok(result.skipped.some((entry) => entry.path === 'Cargo.toml'));
+    assert.equal(io.bytes, totalOf(result.files), 'the grown file was not read');
+    assert.ok(io.bytes <= DEFAULT_BUDGET.maxTotalBytes);
+  });
+
+  it('fails closed when a reader hands over more bytes than it listed', () => {
+    const calls: string[] = [];
+    const lying: RepositoryReader = {
+      list: () => [
+        { path: 'a.md', kind: 'file', size: 100 },
+        { path: 'b.md', kind: 'file', size: 10 },
+      ],
+      read: (path) => {
+        calls.push(path);
+        // The listing claimed 100 bytes; the read returns 200.
+        return path === 'a.md' ? { kind: 'ok', bytes: new Uint8Array(200) } : { kind: 'ok', bytes: new Uint8Array(10) };
+      },
+    };
+
+    const reader = snapshotReader(lying, { ...DEFAULT_BUDGET, maxTotalBytes: 10_000 });
+    reader.list('');
+
+    assert.equal(reader.read('a.md').kind, 'ok');
+    // A size that does not match the listing means the budget can no longer be
+    // trusted, so the next read is refused rather than risked.
+    assert.equal(reader.read('b.md').kind, 'unreadable');
+    assert.deepEqual(calls, ['a.md'], 'the refused file was never handed to the reader');
+  });
+
+  it('refuses an unsized file when the remaining budget cannot cover the worst case', () => {
+    const calls: string[] = [];
+    const unsized: RepositoryReader = {
+      list: () => [{ path: 'a.md', kind: 'file', size: 6_000 }],
+      read: (path) => {
+        calls.push(path);
+        return { kind: 'ok', bytes: new Uint8Array(6_000) };
+      },
+    };
+
+    // 4_000 bytes left, but a permitted file may be up to 32_768: admitting it
+    // could overspend, so it is refused unopened.
+    const reader = snapshotReader(unsized, { ...DEFAULT_BUDGET, maxTotalBytes: 10_000 });
+    reader.list('');
+
+    assert.equal(reader.read('a.md').kind, 'ok');
+    assert.equal(reader.read('unlisted.toml').kind, 'unreadable');
+    assert.deepEqual(calls, ['a.md']);
   });
 });
