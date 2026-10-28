@@ -26,7 +26,7 @@
  * `transitions -> graph`.
  */
 
-import { canonicalDecisionSnapshot, readStoredSession } from './session.ts';
+import { canonicalDecisionSnapshot, readStoredSession, settledWithUnmetPrerequisites } from './session.ts';
 import type { Decision, Session } from './session.ts';
 import {
   decisionEligibility,
@@ -52,6 +52,7 @@ export type TransitionErrorCode =
   | 'not-eligible'
   | 'deferred-decision'
   | 'invalid-option'
+  | 'invalid-answer'
   | 'unresolved-answer'
   | 'critical-deferral'
   | 'already-settled'
@@ -96,6 +97,17 @@ function guardSession(value: unknown): { ok: true; session: Session } | { ok: fa
     ? 'no session was supplied'
     : `the session cannot be trusted: ${read.reason}`;
   return { ok: false, error: { code: 'invalid-session', message } };
+}
+
+/**
+ * Narrow runtime guard for payloads that arrive from outside the type system.
+ *
+ * Slice 4 will feed these functions from a host adapter, where a malformed
+ * call is a real possibility and an uncaught property access would take down
+ * the command instead of reporting a refusal.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -160,10 +172,18 @@ function sameAnswer(a: Decision['answer'], b: Decision['answer']): boolean {
 /**
  * Revokes approval when an edit changed the reviewed snapshot.
  *
- * Uses the snapshot itself rather than a "something changed" flag, so an edit
- * that lands back on the approved decisions does not spuriously revoke, and an
- * edit that changes anything the snapshot covers cannot leave stale approval
- * standing.
+ * The whole lifecycle, because it is easy to assume more than happens:
+ *
+ * 1. The first material change drops `approvedAt` and `approvedSnapshot` and
+ *    returns the session to `interviewing`.
+ * 2. That metadata is gone. Reverting the change afterwards finds no approval to
+ *    compare against, so it does **not** restore the previous approval — a fresh,
+ *    explicit `approveSession` is required.
+ *
+ * `canonicalDecisionSnapshot` is used rather than a "something changed" flag so
+ * that an edit which is a genuine no-op (the identical answer, see
+ * `answerDecision`) never revokes anything. It is *not* a promise that editing
+ * and then reverting keeps approval: once revoked, approval stays revoked.
  */
 function revokeApprovalIfStale(session: Session, decisions: readonly Decision[], now: string): Session {
   if (session.approvedAt === undefined && session.approvedSnapshot === undefined) {
@@ -285,7 +305,11 @@ export function answerDecision(
     );
   }
 
-  if (typeof answer.text !== 'string' || answer.text.trim() === '') {
+  if (!isRecord(answer) || typeof answer.text !== 'string') {
+    // Malformed runtime payload, not a decision the person could have meant.
+    return fail('invalid-answer', 'an answer must be an object with text', { decisionId });
+  }
+  if (answer.text.trim() === '') {
     return fail('unresolved-answer', 'an answer needs text', { decisionId });
   }
 
@@ -314,12 +338,16 @@ export function answerDecision(
   }
 
   const hadAnswer = target.answer !== undefined;
-  const materiallyChanged = !hadAnswer || !sameAnswer(target.answer, nextAnswer);
+  const identical = hadAnswer && sameAnswer(target.answer, nextAnswer);
+  // Repeating a settled answer changes nothing. Repeating a *retained* answer
+  // is different: `needs_review` marks that answer stale, so the person saying
+  // it again is an explicit reconfirmation and must restore `answered`.
+  const reconfirmation = target.status !== 'answered';
 
-  if (!materiallyChanged) {
-    // Re-recording the same answer is a no-op, not a write. It must not bump a
-    // timestamp (the snapshot covers `updatedAt`) and must not invalidate a
-    // single dependent.
+  if (identical && !reconfirmation) {
+    // Re-recording the same answer on a settled decision is a no-op, not a
+    // write. It must not bump a timestamp (the snapshot covers `updatedAt`) and
+    // must not invalidate a single dependent.
     return { ok: true, session: current };
   }
 
@@ -330,8 +358,10 @@ export function answerDecision(
   });
 
   let decisions = replaceDecision(current.decisions, answered);
-  if (hadAnswer) {
+  if (hadAnswer && !identical) {
     // A genuine revision: everything decided on top of the old answer is stale.
+    // A reconfirmation of an identical answer invalidates nothing, so dependents
+    // that are already stale stay stale until each is reconsidered on its own.
     decisions = invalidateDescendants(decisions, decisionId, now);
   }
 
@@ -480,11 +510,14 @@ export type ApprovalBlockerKind =
   | 'needs-review'
   | 'assumption-not-confirmed'
   | 'deferred-critical'
-  | 'unsettled-critical';
+  | 'unsettled-critical'
+  | 'unmet-prerequisite';
 
 export type ApprovalBlocker = {
   kind: ApprovalBlockerKind;
   decisionId?: string;
+  /** Prerequisites still outstanding, when `kind` is `unmet-prerequisite`. */
+  pending?: string[];
   message: string;
 };
 
@@ -534,6 +567,12 @@ export function approvalReadiness(session: Session): ApprovalReadiness {
     return { ready: false, blockers };
   }
 
+  // One definition of the contradiction, shared with the approved-session
+  // validator, so readiness and validation cannot disagree.
+  const unmetById = new Map(
+    settledWithUnmetPrerequisites(decisions).map((conflict) => [conflict.decisionId, conflict.pending]),
+  );
+
   for (const decision of decisions) {
     if (decision.status === 'needs_review') {
       blockers.push({
@@ -543,8 +582,24 @@ export function approvalReadiness(session: Session): ApprovalReadiness {
       });
       continue;
     }
+
+    if (isSettledDecision(decision)) {
+      // A settled decision resting on an unsettled prerequisite is a
+      // contradiction: the answer would be approval over ground the person
+      // never settled.
+      const pending = unmetById.get(decision.id);
+      if (pending !== undefined) {
+        blockers.push({
+          kind: 'unmet-prerequisite',
+          decisionId: decision.id,
+          pending: [...pending],
+          message: `${decision.id} is answered but waits on unsettled ${pending.join(', ')}`,
+        });
+      }
+      continue;
+    }
+
     if (decision.priority !== 'critical') continue;
-    if (isSettledDecision(decision)) continue;
 
     if (decision.status === 'assumed') {
       blockers.push({
@@ -608,7 +663,7 @@ export function approveSession(
   if (!guarded.ok) return guarded;
   const current = guarded.session;
 
-  if (confirmation === undefined || confirmation.confirmed !== true) {
+  if (!isRecord(confirmation) || confirmation.confirmed !== true) {
     return fail('not-confirmed', 'approval needs an explicit confirmation from the user');
   }
 

@@ -383,6 +383,30 @@ describe('needs_review retention', () => {
     if (result.kind !== 'unreadable') return;
     assert.match(result.reason, /unresolved critical decision/);
   });
+
+  it('S1-20: an approved session cannot rest a settled answer on an unsettled prerequisite', () => {
+    // The graph is structurally valid; the contradiction is semantic. A settled
+    // decision depends on one the user deferred.
+    const deferred = { ...validDecision, id: 'd1', priority: 'minor' as const, status: 'deferred' as const };
+    const settled = {
+      ...settledDecision,
+      id: 'd2',
+      prerequisites: ['d1'],
+      answer: { text: 'Just me', chosenOptionId: 'a', actor: 'user' as const },
+    };
+    const result = readStoredSession(approvedSession([deferred, settled]));
+
+    assert.equal(result.kind, 'unreadable');
+    if (result.kind !== 'unreadable') return;
+    assert.match(result.reason, /prerequisites are unresolved/);
+    assert.match(result.reason, /d2 waits on d1/);
+  });
+
+  it('S1-20b: a legitimate non-critical deferral with no settled dependent is allowed', () => {
+    const deferred = { ...validDecision, id: 'd1', priority: 'minor' as const, status: 'deferred' as const };
+    const result = readStoredSession(approvedSession([settledDecision, deferred]));
+    assert.equal(result.kind, 'ok');
+  });
 });
 
 describe('legacy M0 compatibility', () => {

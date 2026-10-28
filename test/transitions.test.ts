@@ -185,6 +185,80 @@ describe('answer and revise', () => {
     // The snapshot covers the text, so a wording change invalidates dependents.
     assert.equal(statusOf(after, 'd2'), 'needs_review');
   });
+
+  it('10c. reconfirming a stale answer restores it, and readiness with it', () => {
+    // Change the root, which makes the dependent stale.
+    const revised = expectOk(answerDecision(
+      session([answered('d1'), answered('d2', ['d1'], 'One team')]),
+      'd1',
+      { text: 'Many teams' },
+      LATER,
+    ));
+    assert.equal(statusOf(revised, 'd2'), 'needs_review');
+    assert.equal(approvalReadiness(revised).ready, false);
+
+    // The person confirms the dependent's exact previous text and option id.
+    const reconfirmed = expectOk(answerDecision(
+      revised,
+      'd2',
+      { text: 'One team', chosenOptionId: 'yes' },
+      '2026-10-28T14:00:00.000Z',
+    ));
+
+    const d2 = byId(reconfirmed, 'd2');
+    assert.equal(d2.status, 'answered', 'an explicit reconfirmation must settle the decision');
+    assert.deepEqual(d2.answer, { text: 'One team', chosenOptionId: 'yes', actor: 'user' });
+    assert.equal(d2.updatedAt, '2026-10-28T14:00:00.000Z');
+    // Readiness is restored by confirming, not by any automatic repair.
+    assert.equal(approvalReadiness(reconfirmed).ready, true);
+  });
+
+  it('10d. reconfirmation on a deeper chain restores one level at a time', () => {
+    const revised = expectOk(answerDecision(
+      session([answered('d1'), answered('d2', ['d1']), answered('d3', ['d2'])]),
+      'd1',
+      { text: 'Many teams' },
+      LATER,
+    ));
+    assert.equal(statusOf(revised, 'd2'), 'needs_review');
+    assert.equal(statusOf(revised, 'd3'), 'needs_review');
+
+    // d3 cannot be confirmed while d2 is still stale: prerequisites must hold.
+    expectFail(answerDecision(revised, 'd3', { text: 'Just me', chosenOptionId: 'yes' }, LATER), 'not-eligible');
+
+    const afterD2 = expectOk(answerDecision(revised, 'd2', { text: 'Just me', chosenOptionId: 'yes' }, LATER));
+    assert.equal(statusOf(afterD2, 'd2'), 'answered');
+    // d3 stays stale until it is reconsidered on its own.
+    assert.equal(statusOf(afterD2, 'd3'), 'needs_review');
+    assert.equal(approvalReadiness(afterD2).ready, false);
+
+    const afterD3 = expectOk(answerDecision(afterD2, 'd3', { text: 'Just me', chosenOptionId: 'yes' }, LATER));
+    assert.equal(statusOf(afterD3, 'd3'), 'answered');
+    assert.equal(approvalReadiness(afterD3).ready, true);
+  });
+
+  it('10e. a genuinely unchanged settled answer stays a true no-op', () => {
+    const before = session([answered('d1'), answered('d2', ['d1'])]);
+    const after = expectOk(answerDecision(before, 'd1', { text: 'Just me', chosenOptionId: 'yes' }, LATER));
+    // Byte-for-byte identical: no timestamp bump, no invalidation.
+    assert.deepEqual(after, before);
+  });
+
+  it('10f. reconfirmation never approves or restores approval on its own', () => {
+    const revised = expectOk(answerDecision(
+      session([answered('d1'), answered('d2', ['d1'])]),
+      'd1',
+      { text: 'Many teams' },
+      LATER,
+    ));
+    const reconfirmed = expectOk(answerDecision(revised, 'd2', { text: 'Just me', chosenOptionId: 'yes' }, LATER));
+
+    assert.equal(approvalReadiness(reconfirmed).ready, true);
+    // Ready, but not approved: readiness is still a calculation.
+    assert.equal(reconfirmed.status, 'interviewing');
+    assert.equal(reconfirmed.approvedAt, undefined);
+    assert.equal(reconfirmed.approvedSnapshot, undefined);
+  });
 });
 
 describe('transitive invalidation', () => {
@@ -592,6 +666,35 @@ describe('explicit approval', () => {
     assert.equal(approved.session.status, 'approved');
     assert.equal(approved.session.approvedAt, LATER);
   });
+
+  it('21d. edit then revert does not restore the previous approval', () => {
+    const approved = approveSession(session([answered('d1')]), { confirmed: true }, LATER);
+    if (!approved.ok) throw new Error(approved.error.message);
+    const originalSnapshot = approved.session.approvedSnapshot;
+    assert.equal(approved.session.status, 'approved');
+
+    // A material edit revokes and clears the metadata.
+    const edited = expectOk(answerDecision(approved.session, 'd1', { text: 'Many teams' }, LATER));
+    assert.equal(edited.status, 'interviewing');
+    assert.equal(edited.approvedAt, undefined);
+    assert.equal(edited.approvedSnapshot, undefined);
+
+    // Reverting to the original text is still a material edit, and there is no
+    // approval left to compare against, so nothing is restored.
+    const reverted = expectOk(answerDecision(edited, 'd1', { text: 'Just me', chosenOptionId: 'yes' }, LATER));
+    assert.equal(reverted.status, 'interviewing');
+    assert.equal(reverted.approvedAt, undefined);
+    assert.equal(reverted.approvedSnapshot, undefined);
+    assert.notEqual(reverted.approvedSnapshot, originalSnapshot);
+    // The decisions are back to what was approved, but approval is not.
+    assert.equal(approvalReadiness(reverted).ready, true);
+
+    // Fresh explicit approval is the only way back.
+    const reapproved = approveSession(reverted, { confirmed: true }, '2026-10-28T20:00:00.000Z');
+    if (!reapproved.ok) throw new Error(reapproved.error.message);
+    assert.equal(reapproved.session.status, 'approved');
+    assert.equal(reapproved.session.approvedAt, '2026-10-28T20:00:00.000Z');
+  });
 });
 
 describe('safety', () => {
@@ -658,6 +761,117 @@ describe('safety', () => {
     const malformed = session([{ id: 'd1' } as unknown as Decision]);
     expectFail(pauseSession(malformed, LATER), 'invalid-session');
     assert.equal(approvalReadiness(malformed).ready, false);
+  });
+
+  it('24d. malformed answer payloads return a typed failure instead of throwing', () => {
+    const before = session([decision('d1')]);
+    const snapshot = structuredClone(before);
+    const payloads: unknown[] = [null, undefined, 42, 'Just me', [], { text: 42 }, {}];
+
+    for (const payload of payloads) {
+      const result = answerDecision(before, 'd1', payload as never, LATER);
+      assert.equal(result.ok, false, `expected a refusal for ${JSON.stringify(payload)}`);
+      if (result.ok) continue;
+      assert.equal(result.error.code, 'invalid-answer');
+    }
+    // The session is untouched by every malformed call.
+    assert.deepEqual(before, snapshot);
+  });
+
+  it('24e. malformed confirmations return a typed failure instead of throwing', () => {
+    const ready = session([answered('d1')]);
+    const snapshot = structuredClone(ready);
+    const payloads: unknown[] = [null, undefined, 42, 'yes', [], {}, { confirmed: 'yes' }, { confirmed: 1 }];
+
+    for (const payload of payloads) {
+      const result = approveSession(ready, payload as never, LATER);
+      assert.equal(result.ok, false, `expected a refusal for ${JSON.stringify(payload)}`);
+      if (result.ok) continue;
+      assert.equal(result.error.code, 'not-confirmed');
+    }
+    assert.deepEqual(ready, snapshot);
+  });
+
+  it('24f. malformed ids and timestamps do not throw', () => {
+    const before = session([decision('d1')]);
+    for (const id of [null, undefined, 42, {}, []] as unknown[]) {
+      assert.equal(answerDecision(before, id as never, { text: 'x' }, LATER).ok, false);
+      assert.equal(deferDecision(before, id as never, LATER).ok, false);
+      assert.equal(reconsiderDeferred(before, id as never, LATER).ok, false);
+    }
+    // A junk timestamp must not silently produce invalid state.
+    const junkTime = answerDecision(before, 'd1', { text: 'Just me' }, undefined as never);
+    assert.equal(junkTime.ok, false, 'a missing timestamp must not produce an invalid session');
+  });
+});
+
+describe('approval and prerequisite consistency', () => {
+  /** D1 non-critical and deferred; D2 critical and answered on top of it. */
+  function contradictorySession(): Session {
+    return session([
+      decision('d1', { priority: 'minor', status: 'deferred' }),
+      // Structurally valid, semantically impossible: answered on unsettled ground.
+      answered('d2', ['d1']),
+    ]);
+  }
+
+  it('25. readiness rejects a settled decision resting on an unsettled prerequisite', () => {
+    const readiness = approvalReadiness(contradictorySession());
+    assert.equal(readiness.ready, false);
+    const blocker = readiness.blockers.find((b) => b.kind === 'unmet-prerequisite');
+    assert.ok(blocker, `expected an unmet-prerequisite blocker, got ${JSON.stringify(readiness.blockers)}`);
+    assert.equal(blocker.decisionId, 'd2');
+    assert.deepEqual(blocker.pending, ['d1']);
+  });
+
+  it('26. direct approval of that session is refused', () => {
+    const result = approveSession(contradictorySession(), { confirmed: true }, LATER);
+    expectFail(result, 'not-ready');
+    if (result.ok) return;
+    assert.ok(result.error.blockers?.some((b) => b.kind === 'unmet-prerequisite'));
+  });
+
+  it('27. a fabricated matching snapshot does not make it loadable', () => {
+    const decisions = contradictorySession().decisions;
+    const forged = {
+      ...contradictorySession(),
+      status: 'approved' as const,
+      approvedAt: LATER,
+      // A perfectly valid-looking snapshot of these very decisions.
+      approvedSnapshot: canonicalDecisionSnapshot(decisions),
+    };
+    const read = readStoredSession(forged);
+    assert.equal(read.kind, 'unreadable');
+    if (read.kind !== 'unreadable') return;
+    assert.match(read.reason, /prerequisites are unresolved/);
+  });
+
+  it('28. non-critical deferrals that undermine nothing are still allowed', () => {
+    // A deferred minor decision with no settled dependent blocks nothing.
+    const fine = session([
+      answered('d1'),
+      decision('d2', { priority: 'minor', status: 'deferred' }),
+      answered('d3', ['d1']),
+    ]);
+    assert.equal(approvalReadiness(fine).ready, true);
+
+    const approved = approveSession(fine, { confirmed: true }, LATER);
+    assert.equal(approved.ok, true);
+    if (!approved.ok) return;
+    assert.equal(readStoredSession(approved.session).kind, 'ok');
+  });
+
+  it('29. deferral cannot create the contradiction through the transitions', () => {
+    // d1 is non-critical and unanswered, so it is deferrable; d2 was never
+    // answerable while d1 was open, so it cannot end up settled on top of it.
+    const before = session([decision('d1', { priority: 'minor' }), decision('d2', { prerequisites: ['d1'] })]);
+    expectFail(answerDecision(before, 'd2', { text: 'Just me' }, LATER), 'not-eligible');
+
+    const deferred = deferDecision(before, 'd1', LATER);
+    if (!deferred.ok) throw new Error(deferred.error.message);
+    expectFail(answerDecision(deferred.session, 'd2', { text: 'Just me' }, LATER), 'not-eligible');
+    // Readiness stays consistent with what validation would accept.
+    assert.equal(approvalReadiness(deferred.session).ready, false);
   });
 });
 
