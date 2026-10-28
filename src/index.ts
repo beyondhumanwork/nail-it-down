@@ -5,6 +5,7 @@ import * as copy from './core/copy.ts';
 import {
   readSession,
   removeSession,
+  sessionKeyFor,
   writeSession,
 } from './core/persistence.ts';
 import type { KeyValueStore } from './core/persistence.ts';
@@ -192,15 +193,42 @@ type SaveOutcome =
  * fails, the caller is told the saved state is uncertain rather than being told
  * anything reassuring.
  */
-async function save(deps: Deps, next: Session, previous: Session | undefined): Promise<SaveOutcome> {
+/**
+ * The value currently stored for this workspace, exactly as it was written.
+ *
+ * Raw rather than parsed on purpose: rolling back must restore the bytes that
+ * were there, including a record this version cannot read. Restoring a
+ * re-serialised session would quietly drop fields a future version stored.
+ */
+type RawEntry = { present: boolean; value: unknown };
+
+function rawSession(deps: Deps): RawEntry {
+  const value = deps.store.get(sessionKeyFor(deps.workspace));
+  return { present: value !== undefined, value };
+}
+
+/**
+ * Writes a session, and on failure restores exactly what was stored before.
+ *
+ * Command Code updates its in-memory store *before* it writes the file, so after
+ * a rejected `set` the new value is still visible to `store.get`. The previous
+ * value is therefore read inside the serialized section, before the write, so
+ * the rollback target is the real prior state and not the failed attempt.
+ *
+ * The previous value is restored verbatim. An absent key stays absent, a valid
+ * session comes back as itself, and an unreadable record the person chose to
+ * replace is not deleted when the replacement fails.
+ */
+async function save(deps: Deps, next: Session): Promise<SaveOutcome> {
   return serializeWrite(async () => {
+    const previous = rawSession(deps);
     try {
       await writeSession(deps.store, next);
       return { ok: true };
     } catch (error) {
       const reason = copy.reasonText(error);
       try {
-        if (previous !== undefined) await writeSession(deps.store, previous);
+        if (previous.present) await deps.store.set(sessionKeyFor(next.workspace), previous.value);
         else await removeSession(deps.store, next.workspace);
         return { ok: false, reason, rollbackFailed: false };
       } catch {
@@ -225,17 +253,22 @@ async function startGoal(deps: Deps, goal: string): Promise<string> {
   const loaded = load(deps);
 
   if (loaded.kind === 'corrupt') {
+    // Explicit choice only: an unreadable record is never replaced on its own.
     const replace = await askReplace(deps, 'corrupt');
     if (!replace) return copy.unreadableData(loaded.reason, deps.workspace);
   } else if (loaded.kind === 'session') {
     const replace = await askReplace(deps, 'session');
     if (!replace) return copy.statusReport(loaded.session, approvalReadiness(loaded.session));
   } else if (loaded.kind === 'legacy' || loaded.kind === 'legacy-unreadable') {
-    const migrated = await handleLegacy(deps, loaded, goal);
-    if (migrated !== undefined) return migrated;
-    // handleLegacy returns undefined only when the person chose a fresh start.
+    const outcome = await handleLegacy(deps, loaded, goal);
+    if (outcome.kind === 'handled') return outcome.message;
   }
 
+  return startFresh(deps, goal);
+}
+
+/** Creates and saves a new interview, then drives it. */
+async function startFresh(deps: Deps, goal: string): Promise<string> {
   const session = createInterviewSession({
     id: nextSessionId('interview'),
     workspace: deps.workspace,
@@ -243,8 +276,7 @@ async function startGoal(deps: Deps, goal: string): Promise<string> {
     now: nowIso(),
   });
 
-  const previous = loaded.kind === 'session' ? loaded.session : undefined;
-  const outcome = await save(deps, session, previous);
+  const outcome = await save(deps, session);
   if (!outcome.ok) return saveFailure('the goal', outcome);
 
   return runInterview(deps, session);
@@ -265,21 +297,37 @@ async function askReplace(deps: Deps, existing: 'session' | 'corrupt'): Promise<
 }
 
 /**
- * The M0 record, handled honestly: migrate it or leave it alone.
+ * What the legacy path decided. Explicit rather than "undefined means start
+ * fresh", because that ambiguity turned a dismissed dialog into permission to
+ * write a new session over a record the person had not agreed to touch.
+ */
+type LegacyOutcome =
+  | { kind: 'start-fresh' }
+  | { kind: 'handled'; message: string };
+
+/**
+ * The M0 record, handled honestly.
  *
- * Returns a finished message when the person declines or the record cannot be
- * migrated, and `undefined` only when a fresh interview should start. Nothing is
- * written here; the caller saves.
+ * Only the exact `fresh` label starts a new interview. Dismissal, `undefined`,
+ * an unexpected label, a headless host or an unavailable dialog all cancel with
+ * nothing written. When the record cannot be read at all, the same safe choice
+ * is offered so an unreadable M0 record cannot permanently block starting over.
+ *
+ * Nothing is written here; the caller saves.
  */
 async function handleLegacy(
   deps: Deps,
   loaded: Extract<Loaded, { kind: 'legacy' | 'legacy-unreadable' }>,
   goal: string,
-): Promise<string | undefined> {
-  if (loaded.kind === 'legacy-unreadable') return copy.legacyUnreadable(loaded.reason);
+): Promise<LegacyOutcome> {
+  if (loaded.kind === 'legacy-unreadable') {
+    return offerStartOverUnreadable(deps, copy.legacyUnreadable(loaded.reason));
+  }
 
   const preview = loaded.preview;
-  if (preview.kind === 'unavailable') return copy.migrationNotAvailable(preview.reason);
+  if (preview.kind === 'unavailable') {
+    return offerStartOverUnreadable(deps, copy.migrationNotAvailable(preview.reason));
+  }
 
   const picked = await deps.ui.select({
     title: TITLES.migrate,
@@ -289,15 +337,40 @@ async function handleLegacy(
     ],
   });
 
-  if (picked !== ACTIONS.migrateLabel) return undefined;
+  if (picked === ACTIONS.freshLabel) return { kind: 'start-fresh' };
+  if (picked !== ACTIONS.migrateLabel) {
+    // Dismissed, headless, or an unexpected label: leave everything alone.
+    return { kind: 'handled', message: copy.startAbandoned() };
+  }
 
   const migrated = migrateFromPreview(preview, deps.workspace);
-  const outcome = await save(deps, migrated.session, undefined);
-  if (!outcome.ok) return saveFailure('the migrated interview', outcome);
+  const outcome = await save(deps, migrated.session);
+  if (!outcome.ok) return { kind: 'handled', message: saveFailure('the migrated interview', outcome) };
 
   const notice = copy.migratedFromM0(migrated.session, migrated.stillUnresolved);
   const continued = await runInterview(deps, migrated.session);
-  return `${notice}\n\n${continued}`;
+  return { kind: 'handled', message: `${notice}\n\n${continued}` };
+}
+
+/**
+ * A record this version cannot migrate is not a dead end. The safe answer is
+ * listed first and does nothing; starting over requires the exact label, and the
+ * M0 record is left byte-identical either way.
+ */
+async function offerStartOverUnreadable(deps: Deps, note: string): Promise<LegacyOutcome> {
+  const picked = await deps.ui.select({
+    title: TITLES.startOverUnreadable,
+    options: [
+      { label: ACTIONS.keepLabel, description: 'Nothing changes. This is the safe answer.' },
+      {
+        label: ACTIONS.freshLabel,
+        description: 'Starts a new interview. The M0 record is left exactly as it is.',
+      },
+    ],
+  });
+
+  if (picked === ACTIONS.freshLabel) return { kind: 'start-fresh' };
+  return { kind: 'handled', message: `${note}\n\n${copy.startAbandoned()}` };
 }
 
 /**
@@ -354,10 +427,16 @@ async function resumeInterview(deps: Deps): Promise<string> {
     case 'corrupt':
       return copy.unreadableData(loaded.reason, deps.workspace);
     case 'legacy-unreadable':
-      return copy.legacyUnreadable(loaded.reason);
+      // Resume has no new goal to start with, so it reports and points at the
+      // command that does, rather than inventing one.
+      return copy.legacyUnreadableOnResume(loaded.reason);
     case 'legacy': {
-      const message = await handleLegacy(deps, loaded, loaded.preview.kind === 'unavailable' ? '' : loaded.preview.legacy.goal);
-      return message ?? copy.startAbandoned();
+      const goal = loaded.preview.kind === 'unavailable' ? undefined : loaded.preview.legacy.goal;
+      const outcome = await handleLegacy(deps, loaded, goal ?? '');
+      if (outcome.kind === 'handled') return outcome.message;
+      // Only an explicit "start fresh" reaches here, and only with a real goal.
+      if (goal === undefined || goal.trim() === '') return copy.legacyUnreadableOnResume('the M0 goal is not stored');
+      return startFresh(deps, goal);
     }
     case 'session':
       return continueSession(deps, loaded.session);
@@ -372,7 +451,7 @@ async function continueSession(deps: Deps, session: Session): Promise<string> {
   if (session.status === 'paused') {
     const resumed = resumeSession(session, nowIso());
     if (!resumed.ok) return resumed.error.message;
-    const outcome = await save(deps, resumed.session, session);
+    const outcome = await save(deps, resumed.session);
     if (!outcome.ok) return saveFailure('the resume', outcome);
     const continued = await runInterview(deps, resumed.session);
     return `${copy.resumedFromPause(resumed.session)}\n\n${continued}`;
@@ -450,7 +529,7 @@ async function askDecision(deps: Deps, session: Session, decision: Decision): Pr
   if (picked === ACTIONS.pauseLabel) {
     const result = pauseSession(session, nowIso());
     if (!result.ok) return { kind: 'stop', message: result.error.message };
-    const outcome = await save(deps, result.session, session);
+    const outcome = await save(deps, result.session);
     if (!outcome.ok) return { kind: 'stop', message: saveFailure('the pause', outcome) };
     return { kind: 'stop', message: copy.paused(result.session) };
   }
@@ -466,7 +545,7 @@ async function askDecision(deps: Deps, session: Session, decision: Decision): Pr
   if (isDeferable(spec) && picked === ACTIONS.deferLabel) {
     const result = deferDecision(session, decision.id, nowIso());
     if (!result.ok) return { kind: 'stop', message: result.error.message };
-    const outcome = await save(deps, result.session, session);
+    const outcome = await save(deps, result.session);
     if (!outcome.ok) return { kind: 'stop', message: saveFailure('the deferral', outcome) };
     return { kind: 'continue', session: result.session, message: copy.deferred(result.session, decision) };
   }
@@ -484,7 +563,7 @@ async function askDecision(deps: Deps, session: Session, decision: Decision): Pr
     return { kind: 'stop', message };
   }
 
-  const outcome = await save(deps, result.session, session);
+  const outcome = await save(deps, result.session);
   if (!outcome.ok) return { kind: 'stop', message: saveFailure('the answer', outcome) };
 
   return {
@@ -527,7 +606,7 @@ async function chooseAction(deps: Deps, session: Session): Promise<Step> {
   if (picked === ACTIONS.pauseLabel) {
     const result = pauseSession(session, nowIso());
     if (!result.ok) return { kind: 'stop', message: result.error.message };
-    const outcome = await save(deps, result.session, session);
+    const outcome = await save(deps, result.session);
     if (!outcome.ok) return { kind: 'stop', message: saveFailure('the pause', outcome) };
     return { kind: 'stop', message: copy.paused(result.session) };
   }
@@ -578,7 +657,7 @@ async function chooseReconsideration(deps: Deps, session: Session, deferred: Dec
 
   const result = reconsiderDeferred(session, target.id, nowIso());
   if (!result.ok) return { kind: 'stop', message: result.error.message };
-  const outcome = await save(deps, result.session, session);
+  const outcome = await save(deps, result.session);
   if (!outcome.ok) return { kind: 'stop', message: saveFailure('the reconsideration', outcome) };
 
   return {
@@ -619,7 +698,7 @@ async function requestApproval(deps: Deps, session: Session): Promise<Step> {
     return { kind: 'stop', message: copy.notApproved(blockers) };
   }
 
-  const outcome = await save(deps, result.session, session);
+  const outcome = await save(deps, result.session);
   if (!outcome.ok) return { kind: 'stop', message: saveFailure('the approval', outcome) };
 
   return { kind: 'stop', message: copy.approved(result.session) };

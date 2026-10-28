@@ -11,6 +11,7 @@ import type { Session } from '../src/core/session.ts';
 import { sessionKeyFor, storeKeyFor } from '../src/core/persistence.ts';
 import { startRecord, withAnswer, withApproval } from '../src/core/record.ts';
 import { INTERVIEW, createInterviewSession } from '../src/core/interview.ts';
+import { answerDecision, approveSession } from '../src/core/transitions.ts';
 
 const WORKSPACE = '/work/example';
 const V2 = sessionKeyFor(WORKSPACE);
@@ -460,7 +461,274 @@ describe('AC18: failed writes never report success', () => {
     const host = hostWith({ data, failWritesAt: [2, 3], selectAnswers: [A1] });
     const message = await host.run('Add subscriptions');
 
-    assert.match(message, /what is saved is now uncertain/);
+    assert.match(message, /stored state is now uncertain/);
+  });
+});
+
+
+describe('RC-A: legacy dialog cancellation writes nothing', () => {
+  function seed(data: StoreData): void {
+    const base = startRecord({ workspace: WORKSPACE, goal: 'Add billing', now: '2026-10-20T10:00:00.000Z' });
+    data.set(V1, withAnswer(base, {
+      questionId: 'who-uses-this',
+      question: Q1,
+      answer: 'One team',
+      answeredAt: '2026-10-20T10:05:00.000Z',
+    }, '2026-10-20T10:05:00.000Z'));
+  }
+
+  for (const [name, answer] of [
+    ['dismissal', undefined],
+    ['an unexpected label', 'Something else entirely'],
+  ] as const) {
+    it(`${name} cancels without writing a session`, async () => {
+      const data: StoreData = new Map();
+      seed(data);
+      const before = structuredClone(data.get(V1));
+      const sizeBefore = data.size;
+
+      const message = await hostWith({ data, selectAnswers: [answer] }).run('Add billing');
+
+      assert.match(message, /Left everything as it was/);
+      assert.equal(data.has(V2), false, 'no v2 session may be created');
+      assert.deepEqual(data.get(V1), before, 'the M0 record must be untouched');
+      assert.equal(data.size, sizeBefore);
+    });
+  }
+
+  it('a headless host cancels rather than starting fresh', async () => {
+    const data: StoreData = new Map();
+    seed(data);
+    const before = structuredClone(data.get(V1));
+
+    const message = await hostWith({ data, headless: true }).run('Add billing');
+
+    assert.match(message, /Left everything as it was/);
+    assert.equal(data.has(V2), false);
+    assert.deepEqual(data.get(V1), before);
+  });
+
+  it('the exact fresh label does start a new interview', async () => {
+    const data: StoreData = new Map();
+    seed(data);
+    const before = structuredClone(data.get(V1));
+
+    await hostWith({ data, selectAnswers: [ACTIONS.freshLabel, A1, undefined] }).run('A new goal');
+
+    assert.equal(storedSession(data).goal, 'A new goal');
+    assert.deepEqual(data.get(V1), before);
+  });
+});
+
+describe('RC-B: a corrupt record survives a failed replacement', () => {
+  const CORRUPT = { schemaVersion: 2, id: 'broken', decisions: 'not a list' };
+
+  function seedCorrupt(): StoreData {
+    const data: StoreData = new Map();
+    data.set(V2, structuredClone(CORRUPT));
+    return data;
+  }
+
+  it('restores the exact raw record when the replacement write fails', async () => {
+    const data = seedCorrupt();
+    const host = hostWith({ data, failWritesAt: [1], selectAnswers: [ACTIONS.replaceLabel] });
+
+    // The replace confirmation is a dialog, not a write, so the goal write is #1.
+    const message = await host.run('Add subscriptions');
+
+    assert.match(message, /could not save/);
+    assert.deepEqual(data.get(V2), CORRUPT, 'the corrupt record must come back byte-identical');
+  });
+
+  it('never replaces an unreadable record without the explicit choice', async () => {
+    const data = seedCorrupt();
+    const message = await hostWith({ data, selectAnswers: [ACTIONS.keepLabel] }).run('Add subscriptions');
+
+    assert.match(message, /cannot be read/);
+    assert.deepEqual(data.get(V2), CORRUPT);
+
+    // Dismissal is not consent either.
+    await hostWith({ data, selectAnswers: [undefined] }).run('Add subscriptions');
+    assert.deepEqual(data.get(V2), CORRUPT);
+  });
+
+  it('replaces it when the person explicitly chooses to', async () => {
+    const data = seedCorrupt();
+    const host = hostWith({ data, selectAnswers: [ACTIONS.replaceLabel, A1, undefined] });
+    await host.run('Add subscriptions');
+
+    assert.equal(storedSession(data).goal, 'Add subscriptions');
+  });
+
+  it('reports uncertainty, and leaves the record replaced, when the rollback also fails', async () => {
+    const data = seedCorrupt();
+    // Write 1 is the failed goal write; write 2 is its rollback, which also fails.
+    const host = hostWith({ data, failWritesAt: [1, 2], selectAnswers: [ACTIONS.replaceLabel] });
+
+    const message = await host.run('Add subscriptions');
+
+    assert.match(message, /stored state is now uncertain/);
+    assert.doesNotMatch(message, /still there/);
+  });
+
+  it('keeps an absent key absent rather than writing an empty record', async () => {
+    const data: StoreData = new Map();
+    const host = hostWith({ data, failWritesAt: [1] });
+
+    await host.run('Add subscriptions');
+
+    assert.equal(data.has(V2), false, 'a failed first write must not leave a key behind');
+  });
+
+  it('restores a valid session rather than dropping it', async () => {
+    const data: StoreData = new Map();
+    await hostWith({ data, selectAnswers: [A1, undefined] }).run('First goal');
+    const saved = structuredClone(data.get(V2));
+
+    // Write 1 is the replacement goal, which fails.
+    const message = await hostWith({ data, failWritesAt: [1], selectAnswers: [ACTIONS.replaceLabel] })
+      .run('Second goal');
+
+    assert.match(message, /could not save/);
+    assert.deepEqual(data.get(V2), saved);
+    assert.equal(storedSession(data).goal, 'First goal');
+  });
+});
+
+describe('RC-C: failure messages describe the recovered state truthfully', () => {
+  /** Seeds a ready session and approves it through the core, then stores it. */
+  function seedApproved(): StoreData {
+    const data: StoreData = new Map();
+    let current = createInterviewSession({
+      id: 'seeded-approved',
+      workspace: WORKSPACE,
+      goal: 'Approved goal',
+      now: '2026-10-28T10:00:00.000Z',
+    });
+    for (const [id, label] of [
+      ['who-uses-this', A1],
+      ['first-scope', A2],
+      ['proof-of-working', A3],
+    ] as const) {
+      const answeredResult = answerDecision(current, id, { text: label }, '2026-10-28T10:00:00.000Z');
+      if (!answeredResult.ok) throw new Error(answeredResult.error.message);
+      current = answeredResult.session;
+    }
+    const approved = approveSession(current, { confirmed: true }, '2026-10-28T10:05:00.000Z');
+    if (!approved.ok) throw new Error(approved.error.message);
+    data.set(V2, approved.session);
+    return data;
+  }
+
+  it('a failed revision of an approved session does not claim approval disappeared', async () => {
+    const data = seedApproved();
+
+    // Revise the root; the answer write fails and rolls back to the approved session.
+    const host = hostWith({
+      data,
+      failWritesAt: [1],
+      actionAnswers: [ACTIONS.reviseLabel],
+      selectAnswers: [Q1, 'One team'],
+    });
+    const message = await host.run('resume');
+
+    assert.match(message, /could not save/);
+    // The old wording said "nothing is approved", which would be a lie here.
+    assert.doesNotMatch(message, /[Nn]othing is approved/);
+    assert.match(message, /\/naildown status/);
+
+    const session = storedSession(data);
+    assert.equal(session.status, 'approved');
+    assert.ok(session.approvedAt);
+    assert.match(await hostWith({ data }).run('status'), /Approval: approved/);
+  });
+
+  it('a failed new approval is not described as approved', async () => {
+    const data: StoreData = new Map();
+    const host = hostWith({
+      data,
+      failWritesAt: [5],
+      selectAnswers: [A1, A2, A3],
+      actionAnswers: [ACTIONS.approveLabel],
+      approvalAnswers: [APPROVAL.approveLabel],
+    });
+    const message = await host.run('Add subscriptions');
+
+    assert.match(message, /could not save/);
+    assert.doesNotMatch(message, /^Approved/m);
+    assert.equal(storedSession(data).approvedAt, undefined);
+  });
+});
+
+describe('RC-D: an unreadable M0 record cannot block starting over', () => {
+  function seedUnreadable(): StoreData {
+    const data: StoreData = new Map();
+    data.set(V1, { schemaVersion: 9, goal: 42 });
+    return data;
+  }
+
+  it('keeps the data by default and creates nothing', async () => {
+    const data = seedUnreadable();
+    const before = structuredClone(data.get(V1));
+
+    const message = await hostWith({ data, selectAnswers: [ACTIONS.keepLabel] }).run('A new goal');
+
+    assert.match(message, /Left everything as it was/);
+    assert.equal(data.has(V2), false);
+    assert.deepEqual(data.get(V1), before);
+  });
+
+  it('starts a new interview only on the exact fresh label', async () => {
+    const data = seedUnreadable();
+    const before = structuredClone(data.get(V1));
+
+    await hostWith({ data, selectAnswers: [ACTIONS.freshLabel, A1, undefined] }).run('A new goal');
+
+    assert.equal(storedSession(data).goal, 'A new goal');
+    assert.deepEqual(data.get(V1), before, 'the unreadable v1 record must stay byte-identical');
+  });
+
+  for (const [name, answer] of [
+    ['dismissal', undefined],
+    ['an unexpected label', 'Yes please'],
+  ] as const) {
+    it(`${name} creates no session`, async () => {
+      const data = seedUnreadable();
+      const before = structuredClone(data.get(V1));
+
+      const message = await hostWith({ data, selectAnswers: [answer] }).run('A new goal');
+
+      assert.match(message, /Left everything as it was/);
+      assert.equal(data.has(V2), false);
+      assert.deepEqual(data.get(V1), before);
+    });
+  }
+
+  it('resume reports the record and points at the command that can start over', async () => {
+    const data = seedUnreadable();
+    const message = await hostWith({ data }).run('resume');
+    assert.match(message, /cannot be made into an interview/);
+    assert.match(message, /naildown <your idea>/);
+    assert.equal(data.has(V2), false);
+  });
+
+  it('an unavailable migration preview offers the same safe choice', async () => {
+    const data: StoreData = new Map();
+    // A readable v1 record whose conversion cannot satisfy v2.
+    data.set(V1, {
+      schemaVersion: 1,
+      workspace: WORKSPACE,
+      goal: 'Odd goal',
+      status: 'awaiting_answer',
+      createdAt: 'x',
+      updatedAt: 'y',
+      answer: { questionId: 'q', question: 'Q?', answer: 'One team', answeredAt: 'z' },
+      approvedAt: 'w',
+    });
+
+    const kept = await hostWith({ data, selectAnswers: [ACTIONS.keepLabel] }).run('A new goal');
+    assert.match(kept, /Left everything as it was/);
+    assert.equal(data.has(V2), false);
   });
 });
 

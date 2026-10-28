@@ -50,6 +50,7 @@ export const TITLES = {
   chooseDecision: 'Which decision do you want to change?',
   migrate: 'This workspace has an M0 record. What should happen to it?',
   replace: 'This workspace already has an interview. Replace it?',
+  startOverUnreadable: 'This workspace has an M0 record that cannot be migrated. Start over anyway?',
 } as const;
 
 const MAX_REASON_LENGTH = 200;
@@ -265,7 +266,8 @@ export function approvalDismissed(session: Session): string {
 export function notSaved(what: string, reason: string): string {
   return [
     `I could not save ${what} to disk: ${reason}`,
-    'So it is not saved, and nothing is approved.',
+    'What was saved before is still there, but this message cannot tell you what it contains.',
+    'Run /naildown status to see the state that is actually stored.',
   ].join('\n');
 }
 
@@ -276,8 +278,8 @@ export function notSaved(what: string, reason: string): string {
 export function persistenceUncertain(what: string, reason: string): string {
   return [
     `I could not save ${what} to disk: ${reason}`,
-    'I also could not restore what was there before, so what is saved is now uncertain.',
-    'Nothing is approved. Run /naildown status before trusting what it shows.',
+    'I also could not restore what was there before, so the stored state is now uncertain.',
+    'Run /naildown status before trusting what it shows. This message cannot tell you whether anything is approved.',
   ].join('\n');
 }
 
@@ -316,6 +318,14 @@ export function migratedFromM0(session: Session, stillUnresolved: boolean): stri
   }
   lines.push('', 'The M0 approval was a test and was not carried over, so nothing is approved.');
   return lines.join('\n');
+}
+
+export function legacyUnreadableOnResume(reason: string): string {
+  return [
+    `The M0 record for this workspace cannot be made into an interview: ${reason}`,
+    'I left it exactly as it was.',
+    'To start a new interview, run /naildown <your idea>.',
+  ].join('\n');
 }
 
 export function startAbandoned(): string {
