@@ -1,7 +1,7 @@
 # Architecture review gate
 
-**Status:** M0 HOST-FEASIBILITY SPIKE FORMALLY ACCEPTED — 2026-10-25 (with documented M0-09 exception).
-**Full product v0.1 specification:** DRAFT, not yet approved for implementation beyond M0.
+**Historical M0 status:** Host-feasibility spike formally accepted — 2026-10-25 (with documented M0-09 exception).
+**Current M1 status:** The scoped deterministic interview passed technical acceptance on 2026-10-27; see [M1 acceptance and limitations](M1_ACCEPTANCE.md). The full product v0.1 specification remains DRAFT. M2 and later work are not authorized.
 
 The project owner authorized continued development after approving the repository foundation on 2026-10-20. This is recorded as permission to proceed with the narrowly defined **M0 technical feasibility spike only**, not blanket acceptance of every future product, privacy, branding, or release decision.
 
@@ -26,7 +26,7 @@ The project owner authorized continued development after approving the repositor
 - M0 status: **ACCEPTED** by the product owner on 2026-10-25.
 - M0-09 remains a documented host exception (headless `-p` does not dispatch mod slash commands), not a passing test.
 - Evidence: 11/12 acceptance checks on Command Code 1.84.0; 57 unit tests and typecheck passed (not rerun on 1.88.0); owner-operated interactive verification on 1.88.0 confirmed default-deny and restart persistence; source inspection found no breaking changes.
-- The full v0.1 product specification remains a draft. M1 and later require separate authorization.
+- At the time of this M0 acceptance, the full v0.1 specification remained a draft and M1 and later required separate authorization. The later, scoped M1 technical decision is recorded in [M1_ACCEPTANCE.md](M1_ACCEPTANCE.md).
 
 ## Decisions still open for full product sign-off
 
@@ -36,4 +36,4 @@ The project owner authorized continued development after approving the repositor
 - Release branding and distribution requirements.
 - Full product acceptance/evaluation matrix.
 
-See [PRODUCT_SPEC_DRAFT.md](PRODUCT_SPEC_DRAFT.md) and [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md). GitHub issue #1 remains open until the complete product baseline is accepted. This page authorizes only the first thin slice.
+See [PRODUCT_SPEC_DRAFT.md](PRODUCT_SPEC_DRAFT.md) and [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md). GitHub issue #1 remains open until the complete product baseline is accepted. This page records the historical M0 gate; the M1 decision is separate.
