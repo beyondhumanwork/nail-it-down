@@ -2,7 +2,7 @@
 
 **Authorization:** APPROVED for **M2 Slice 2 only** — 2026-10-28.  
 **Base:** `main` at `cd9fcbdfeb0200ef5a2702b38691772a08657d94` (PR #15, M2 Slice 1 merged).  
-**Status:** Implementation authorized, not yet accepted.  
+**Historical authorization:** Slice 2 implementation was authorized here. **Current disposition:** accepted for synthetic-root feasibility only on 2026-10-28; see [M2 Slice 2 acceptance](M2_SLICE2_ACCEPTANCE.md). Real project repository access remains unauthorized.  
 **Parent contract:** [M2 Slice 1](M2_SLICE1_CONTRACT.md). Its evidence and budget policies remain authoritative.
 
 ## Objective and trust boundary
