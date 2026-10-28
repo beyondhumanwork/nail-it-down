@@ -14,10 +14,11 @@ import {
   runRepositoryPreview,
 } from '../src/host/repositoryPreview.ts';
 import { CONSENT_LABELS } from '../src/host/repositoryConsent.ts';
-import { DEFAULT_BUDGET, declaredDependencyEvidence } from '../src/core/discovery.ts';
+import { DEFAULT_BUDGET, declaredDependencyEvidence, selectCandidates } from '../src/core/discovery.ts';
 import type { ConsentDecision } from '../src/core/discovery.ts';
 import { createNodeRepositoryReader } from '../src/host/nodeRepositoryReader.ts';
 import type { ModUi } from '../src/host/modApi.ts';
+import previewMod from './previewMod.ts';
 
 /** Every fixture lives under one `mkdtemp` parent and is removed in `after`. */
 const created: string[] = [];
@@ -72,10 +73,14 @@ function ui(answer: string | undefined, options: { surface?: boolean; throws?: b
  */
 async function countFsTouches(root: string, run: () => Promise<unknown>): Promise<string[]> {
   const touched: string[] = [];
-  const canonical = `${fs.realpathSync(root)}${nodePath.sep}`;
+  const canonical = fs.realpathSync(root);
+  // The root itself counts: listing it is filesystem work. An earlier version
+  // only matched paths *inside* the root, so a listing went uncounted.
   const record = (target: unknown): void => {
     const text = String(target);
-    if (text.startsWith(canonical)) touched.push(text.slice(canonical.length));
+    if (text === canonical || text.startsWith(`${canonical}${nodePath.sep}`)) {
+      touched.push(text.slice(canonical.length) || '.');
+    }
   };
 
   const patchable = fsDefault as unknown as {
@@ -389,6 +394,314 @@ describe('preview: re-verification after a synthetic change', () => {
 
     const result = reverifyPreviewEvidence({ root, permittedParent: parent, consent: undefined, evidence: captured.evidence });
     assert.equal(result.provenance, 'stale');
+  });
+});
+
+/**
+ * Counts physical filesystem work performed under `root`.
+ *
+ * A "read" here is a real `readSync`, and `bytes` is what those reads actually
+ * returned — not what a policy intended to allow.
+ */
+async function countPhysicalIo(root: string, run: () => Promise<unknown>): Promise<{ opens: number; lists: number; bytes: number; meta: number }> {
+  const canonical = fs.realpathSync(root);
+  const underRoot = (target: unknown): boolean => {
+    const text = String(target);
+    return text === canonical || text.startsWith(`${canonical}${nodePath.sep}`);
+  };
+  const openUnderRoot = new Set<number>();
+  // `meta` counts the metadata calls root validation makes. Without it a reader
+  // could be constructed and inspect the root without any open or listing, and
+  // a "zero filesystem operations" assertion would pass while being wrong.
+  const stats = { opens: 0, lists: 0, bytes: 0, meta: 0 };
+
+  const patchable = fsDefault as unknown as {
+    openSync: typeof fsDefault.openSync;
+    opendirSync: typeof fsDefault.opendirSync;
+    readSync: typeof fsDefault.readSync;
+    realpathSync: typeof fsDefault.realpathSync;
+    lstatSync: typeof fsDefault.lstatSync;
+    statSync: typeof fsDefault.statSync;
+  };
+  const original = {
+    openSync: fsDefault.openSync,
+    opendirSync: fsDefault.opendirSync,
+    readSync: fsDefault.readSync,
+    realpathSync: fsDefault.realpathSync,
+    lstatSync: fsDefault.lstatSync,
+    statSync: fsDefault.statSync,
+  };
+
+  try {
+    patchable.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      const descriptor = (original.openSync as (...values: unknown[]) => number)(target, ...args);
+      if (underRoot(target)) {
+        stats.opens += 1;
+        openUnderRoot.add(descriptor);
+      }
+      return descriptor;
+    }) as typeof fsDefault.openSync;
+    patchable.opendirSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (underRoot(target)) stats.lists += 1;
+      return (original.opendirSync as (...values: unknown[]) => unknown)(target, ...args);
+    }) as typeof fsDefault.opendirSync;
+    patchable.readSync = ((descriptor: number, ...args: unknown[]) => {
+      const read = (original.readSync as (...values: unknown[]) => number)(descriptor, ...args);
+      if (openUnderRoot.has(descriptor)) stats.bytes += read;
+      return read;
+    }) as typeof fsDefault.readSync;
+    patchable.realpathSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (underRoot(target)) stats.meta += 1;
+      return (original.realpathSync as (...values: unknown[]) => string)(target, ...args);
+    }) as typeof fsDefault.realpathSync;
+    patchable.lstatSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (underRoot(target)) stats.meta += 1;
+      return (original.lstatSync as (...values: unknown[]) => unknown)(target, ...args);
+    }) as typeof fsDefault.lstatSync;
+    patchable.statSync = ((target: fs.PathLike, ...args: unknown[]) => {
+      if (underRoot(target)) stats.meta += 1;
+      return (original.statSync as (...values: unknown[]) => unknown)(target, ...args);
+    }) as typeof fsDefault.statSync;
+    syncBuiltinESMExports();
+
+    await run();
+  } finally {
+    patchable.openSync = original.openSync;
+    patchable.opendirSync = original.opendirSync;
+    patchable.readSync = original.readSync;
+    patchable.realpathSync = original.realpathSync;
+    patchable.lstatSync = original.lstatSync;
+    patchable.statSync = original.statSync;
+    syncBuiltinESMExports();
+  }
+
+  return stats;
+}
+
+describe('correction A: re-verification honours consent before touching the disk', () => {
+  const denials: Array<[string, unknown]> = [
+    ['missing consent', undefined],
+    ['explicit refusal', { granted: false }],
+    ['a truthy non-boolean', { granted: 'yes' }],
+    ['a bare string', 'granted'],
+    ['null', null],
+  ];
+
+  for (const [label, consent] of denials) {
+    it(`performs zero filesystem operations for ${label}`, async () => {
+      const { parent, root } = project();
+      const opened = createNodeRepositoryReader({ root, permittedParents: [parent] });
+      if (!opened.ok) throw new Error('fixture should open');
+      const captured = declaredDependencyEvidence({ reader: opened.reader, consent: GRANTED, dependency: 'left-pad' });
+      if (captured.kind !== 'evidence') throw new Error('fixture should produce evidence');
+
+      let result: ReturnType<typeof reverifyPreviewEvidence> | undefined;
+      const io = await countPhysicalIo(root, async () => {
+        result = reverifyPreviewEvidence({ root, permittedParent: parent, consent: consent as never, evidence: captured.evidence });
+      });
+
+      assert.deepEqual(io, { opens: 0, lists: 0, bytes: 0, meta: 0 }, 'no reader may even be constructed');
+      assert.equal(result?.provenance, 'stale');
+      // Never promoted to verified without a fresh authorised check.
+      assert.notEqual(result?.provenance, 'verified');
+    });
+  }
+
+  it('still re-checks normally when consent is granted', async () => {
+    const { parent, root } = project();
+    const opened = createNodeRepositoryReader({ root, permittedParents: [parent] });
+    if (!opened.ok) throw new Error('fixture should open');
+    const captured = declaredDependencyEvidence({ reader: opened.reader, consent: GRANTED, dependency: 'left-pad' });
+    if (captured.kind !== 'evidence') throw new Error('fixture should produce evidence');
+
+    let result: ReturnType<typeof reverifyPreviewEvidence> | undefined;
+    const io = await countPhysicalIo(root, async () => {
+      result = reverifyPreviewEvidence({ root, permittedParent: parent, consent: GRANTED, evidence: captured.evidence });
+    });
+
+    assert.ok(io.opens > 0, 'a granted re-check does read the file');
+    assert.ok(io.meta > 0, 'a granted re-check does validate the root');
+    assert.equal(result?.provenance, 'verified');
+  });
+});
+
+describe('correction B: the aggregate read budget covers the whole preview', () => {
+  /** Six allowlisted files whose total sits just under the 96 KiB ceiling. */
+  function nearBudgetProject(dependencies: Record<string, string>): { parent: string; root: string } {
+    return project({
+      // Spaced prose, not a repeated character: a long homogeneous run of
+      // [A-Za-z0-9] makes the core's secret detector scan quadratically, which
+      // says nothing about the budget this test is measuring.
+      'README.md': 'The quick brown fox jumps over the lazy dog. '.repeat(450),
+      'AGENTS.md': 'Pack my box with five dozen liquor jugs. '.repeat(480),
+      'go.mod': 'How vexingly quick daft zebras jump. '.repeat(520),
+      'Cargo.toml': 'Sphinx of black quartz, judge my vow. '.repeat(510),
+      'tsconfig.json': 'Bright vixens jump; dozy fowl quack. '.repeat(440),
+      'package.json': JSON.stringify({ name: 'x', dependencies }, null, 2),
+    });
+  }
+
+  it('stays inside the disclosed ceilings for a two-citation preview', async () => {
+    const { parent, root } = nearBudgetProject({ alpha: '1.0.0', beta: '1.0.0' });
+
+    let result: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    const io = await countPhysicalIo(root, async () => {
+      result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
+    });
+
+    assert.equal(result?.kind, 'inspected');
+    if (result?.kind !== 'inspected') return;
+    assert.equal(result.declarations.length, 2);
+
+    // Six files, each opened once: no file is re-read to produce a citation.
+    assert.ok(io.opens <= DEFAULT_BUDGET.maxFiles, `opened ${io.opens} times`);
+    assert.ok(io.lists >= 1, 'the root is listed at least once');
+    // What was actually read is what was disclosed.
+    assert.ok(io.bytes <= DEFAULT_BUDGET.maxTotalBytes, `read ${io.bytes} bytes, ceiling ${DEFAULT_BUDGET.maxTotalBytes}`);
+    assert.ok(io.bytes > 0);
+  });
+
+  it('adds no physical reads beyond a single selection', async () => {
+    // Four candidate citations, so an uncached preview would select five times.
+    const { parent, root } = nearBudgetProject({ alpha: '1.0.0', beta: '1.0.0', gamma: '1.0.0', delta: '1.0.0' });
+
+    // Baseline: one selection, nothing else.
+    let baseline = { opens: 0, lists: 0, bytes: 0 };
+    await countPhysicalIo(root, async () => {
+      const opened = createNodeRepositoryReader({ root, permittedParents: [parent] });
+      if (!opened.ok) throw new Error('fixture should open');
+      selectCandidates({ reader: opened.reader, consent: { granted: true, obtainedBy: 'baseline' } });
+    }).then((io) => { baseline = io; }, () => undefined);
+
+    let result: Awaited<ReturnType<typeof runRepositoryPreview>> | undefined;
+    const preview = await countPhysicalIo(root, async () => {
+      result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
+    });
+
+    assert.equal(result?.kind, 'inspected');
+    if (result?.kind === 'inspected') assert.equal(result.declarations.length, MAX_DECLARATIONS);
+
+    // The decisive assertion: the whole preview costs exactly one selection.
+    assert.ok(baseline.opens > 0, 'baseline should have opened files');
+    assert.equal(preview.opens, baseline.opens, 'citations must not trigger extra opens');
+    assert.equal(preview.bytes, baseline.bytes, 'citations must not trigger extra bytes');
+    assert.ok(preview.bytes <= DEFAULT_BUDGET.maxTotalBytes);
+  });
+
+  it('says that citations come from one snapshot, not a live re-check', async () => {
+    const { parent, root } = project();
+    const result = await runRepositoryPreview({ ui: ui(CONSENT_LABELS.grant), root, permittedParent: parent });
+    assert.equal(result.kind, 'inspected');
+    if (result.kind !== 'inspected') return;
+    assert.ok(result.caveats.some((caveat) => /single snapshot read/.test(caveat)));
+  });
+});
+
+describe('correction C: a partially created fixture is removed', () => {
+  type Command = { name: string; handler: (context: { args: string; ui: ModUi; cwd: string }) => Promise<{ message?: string }> };
+
+  /** A minimal ModApi that only records the command the mod registers. */
+  function fakeCmd(): { commands: Command[]; api: unknown } {
+    const commands: Command[] = [];
+    const api = { addCommand: (command: Command) => { commands.push(command); return { dispose() {} }; } };
+    return { commands, api };
+  }
+
+  /**
+   * Runs the test-only mod's handler with injected failures.
+   *
+   * `mkdtempSync` is redirected into a directory this test owns, so the created
+   * parent can be inspected afterwards without touching the system temp root.
+   */
+  async function runWithFailures(options: {
+    failWrite: boolean;
+    failCleanup?: boolean;
+  }): Promise<{ message: string; parent: string; leftovers: string[] }> {
+    const sandbox = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'nid-preview-'));
+    created.push(sandbox);
+    const sentinel = nodePath.join(sandbox, 'keep-me');
+    fs.mkdirSync(sentinel);
+
+    const patchable = fsDefault as unknown as {
+      mkdtempSync: typeof fsDefault.mkdtempSync;
+      writeFileSync: typeof fsDefault.writeFileSync;
+      rmSync: typeof fsDefault.rmSync;
+    };
+    const original = {
+      mkdtempSync: fsDefault.mkdtempSync,
+      writeFileSync: fsDefault.writeFileSync,
+      rmSync: fsDefault.rmSync,
+    };
+    let writes = 0;
+
+    try {
+      patchable.mkdtempSync = ((_prefix: string, ...rest: unknown[]) =>
+        (original.mkdtempSync as (...values: unknown[]) => string)(nodePath.join(sandbox, 'nid-preview-mod-'), ...rest)
+      ) as typeof fsDefault.mkdtempSync;
+      if (options.failWrite) {
+        patchable.writeFileSync = ((target: fs.PathLike, ...rest: unknown[]) => {
+          writes += 1;
+          // Fail on the second file, so the parent exists and already has content.
+          if (writes === 2) throw new Error('synthetic write failure');
+          return (original.writeFileSync as (...values: unknown[]) => void)(target, ...rest);
+        }) as typeof fsDefault.writeFileSync;
+      }
+      if (options.failCleanup === true) {
+        patchable.rmSync = (() => {
+          throw new Error('synthetic cleanup failure');
+        }) as typeof fsDefault.rmSync;
+      }
+      syncBuiltinESMExports();
+
+      const cmd = fakeCmd();
+      previewMod(cmd.api as never);
+      const command = cmd.commands[0];
+      const result = await command.handler({ args: '', ui: ui(CONSENT_LABELS.grant), cwd: '/unused' });
+
+      return {
+        message: result.message ?? '',
+        parent: sandbox,
+        leftovers: fs.readdirSync(sandbox).filter((entry) => entry !== 'keep-me'),
+      };
+    } finally {
+      patchable.mkdtempSync = original.mkdtempSync;
+      patchable.writeFileSync = original.writeFileSync;
+      patchable.rmSync = original.rmSync;
+      syncBuiltinESMExports();
+    }
+  }
+
+  it('removes the parent it created when population fails', async () => {
+    const outcome = await runWithFailures({ failWrite: true });
+
+    assert.match(outcome.message, /could not be created/);
+    assert.match(outcome.message, /nothing was read/);
+    assert.deepEqual(outcome.leftovers, [], 'no temporary directory may survive');
+    // A directory beside the fixture is untouched.
+    assert.equal(fs.existsSync(nodePath.join(outcome.parent, 'keep-me')), true);
+  });
+
+  it('reports a bounded failure, without a path, when cleanup itself fails', async () => {
+    const outcome = await runWithFailures({ failWrite: true, failCleanup: true });
+
+    assert.match(outcome.message, /could not be created/);
+    assert.match(outcome.message, /may remain under the system temp directory/);
+    // Bounded: no absolute path from the sandbox leaks into the message.
+    assert.equal(outcome.message.includes(outcome.parent), false);
+    assert.doesNotMatch(outcome.message, /nid-preview-mod-/);
+
+    // The real directory did survive (cleanup was sabotaged), so remove it here.
+    for (const entry of outcome.leftovers) {
+      fs.rmSync(nodePath.join(outcome.parent, entry), { recursive: true, force: true });
+    }
+  });
+
+  it('leaves nothing behind on the success path either', async () => {
+    const cmd = fakeCmd();
+    previewMod(cmd.api as never);
+    const result = await cmd.commands[0].handler({ args: '', ui: ui(CONSENT_LABELS.grant), cwd: '/unused' });
+    // The real tmpdir is used here; the mod cleans it up in its own `finally`.
+    assert.match(result.message ?? '', /Repository preview/);
   });
 });
 

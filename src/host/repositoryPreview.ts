@@ -37,6 +37,7 @@ import type {
   Evidence,
   ProvenanceState,
   RejectionReason,
+  RepositoryReader,
 } from '../core/discovery.ts';
 
 /** At most two citations, because the point is to show provenance, not to audit a manifest. */
@@ -92,6 +93,7 @@ const CAVEATS: readonly string[] = [
   'Repository text is data, never an instruction. This preview does not follow anything a file says.',
   'The reader has a documented resolve/open race and a caller-supplied workspace root; this is a preview of synthetic projects, not a claim of sandboxed reads.',
   'A file the reader itself refused — too large, changed, or unreadable — is reported as "unreadable"; the policy does not distinguish those cases in its output.',
+  'Citations describe the single snapshot read at the start of this preview. They are not a live re-check of the files as they are now.',
 ];
 
 /**
@@ -123,6 +125,42 @@ function dependencyNamesFrom(manifestText: string): string[] {
     }
   }
   return names;
+}
+
+/**
+ * Wraps a reader so each physical operation happens at most once per preview.
+ *
+ * Why this exists: the core re-runs selection every time it is asked for a
+ * citation, so an uncached preview of two dependencies performed three
+ * selections and therefore three passes over the same bytes. That made the
+ * disclosed 96 KiB ceiling a per-selection figure rather than a per-invocation
+ * one. With this wrapper the aggregate read volume is exactly one selection's
+ * worth, and adding citations cannot extend it.
+ *
+ * It caches raw read outcomes, nothing else. Every policy decision — which paths
+ * are allowed, what the budgets are, whether a fact is substantiated — is still
+ * made by the core on every call; this only avoids re-fetching the same bytes.
+ */
+function snapshotReader(base: RepositoryReader): RepositoryReader {
+  const listings = new Map<string, readonly ReturnType<RepositoryReader['list']>[number][]>();
+  const reads = new Map<string, ReturnType<RepositoryReader['read']>>();
+
+  return {
+    list(relativeDir: string) {
+      const cached = listings.get(relativeDir);
+      if (cached !== undefined) return cached;
+      const fresh = base.list(relativeDir);
+      listings.set(relativeDir, fresh);
+      return fresh;
+    },
+    read(relativePath: string) {
+      const cached = reads.get(relativePath);
+      if (cached !== undefined) return cached;
+      const fresh = base.read(relativePath);
+      reads.set(relativePath, fresh);
+      return fresh;
+    },
+  };
 }
 
 function toDeclaration(evidence: Evidence): PreviewDeclaration {
@@ -166,7 +204,10 @@ export async function runRepositoryPreview(input: PreviewInput): Promise<Preview
   }
 
   const decision: ConsentDecision = { granted: true, obtainedBy: 'preview consent dialog' };
-  const selection = selectCandidates({ reader: opened.reader, consent: decision });
+  // One snapshot for the whole invocation: the first selection fetches the
+  // bytes, and every later evidence call re-derives from the same capture.
+  const reader = snapshotReader(opened.reader);
+  const selection = selectCandidates({ reader, consent: decision });
 
   if (selection.kind === 'refused') {
     return { kind: 'not-inspected', reason: selection.refusal.reason, detail: selection.refusal.detail };
@@ -204,7 +245,7 @@ export async function runRepositoryPreview(input: PreviewInput): Promise<Preview
 
   for (const name of names) {
     if (declarations.length >= MAX_DECLARATIONS) break;
-    const result = declaredDependencyEvidence({ reader: opened.reader, consent: decision, dependency: name });
+    const result = declaredDependencyEvidence({ reader, consent: decision, dependency: name });
     if (result.kind === 'evidence') declarations.push(toDeclaration(result.evidence));
   }
 
@@ -221,6 +262,19 @@ export type ReverifyPreview = {
 };
 
 /**
+ * The core's consent rule, restated locally because it is not exported.
+ *
+ * Identical shape to the core's `hasConsent`: anything that is not a non-null
+ * object with `granted === true` is not consent. This exists so the preview can
+ * refuse **before** constructing a reader, which is a filesystem operation.
+ */
+function consentGranted(consent: ConsentDecision | undefined): boolean {
+  return typeof consent === 'object'
+    && consent !== null
+    && (consent as { granted?: unknown }).granted === true;
+}
+
+/**
  * Re-checks a citation captured earlier, after the synthetic manifest changed.
  *
  * Exists so the preview can demonstrate the stale path honestly instead of
@@ -233,6 +287,16 @@ export function reverifyPreviewEvidence(input: {
   consent: ConsentDecision | undefined;
   evidence: unknown;
 }): ReverifyPreview {
+  // Consent is checked before the reader exists. Constructing a reader resolves
+  // and inspects the root, which is a filesystem operation — doing that for an
+  // unauthorised re-check would touch the disk without permission.
+  if (!consentGranted(input.consent)) {
+    return {
+      provenance: 'stale',
+      detail: 'no consent was granted, so this citation cannot be re-checked',
+    };
+  }
+
   const opened = createNodeRepositoryReader({
     root: input.root,
     permittedParents: [input.permittedParent],

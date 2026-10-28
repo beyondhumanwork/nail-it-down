@@ -48,18 +48,34 @@ const PACKAGE_JSON = JSON.stringify({
  * probe run under an ephemeral `TMPDIR` that is deleted between calls fails
  * here with ENOENT, which is why this returns a result instead of throwing.
  */
-function createFixture(): { ok: true; parent: string; root: string } | { ok: false } {
+type FixtureResult =
+  | { ok: true; parent: string; root: string }
+  /** `cleanupFailed` means the parent may still be on disk. No path is returned. */
+  | { ok: false; cleanupFailed: boolean };
+
+function createFixture(): FixtureResult {
+  // The parent is tracked from the moment it exists, so a failure part-way
+  // through population cannot leave a temporary directory behind.
+  let parent: string | undefined;
   try {
-    const parent = mkdtempSync(join(tmpdir(), 'nid-preview-mod-'));
+    parent = mkdtempSync(join(tmpdir(), 'nid-preview-mod-'));
     const root = join(parent, 'project');
     mkdirSync(root);
     writeFileSync(join(root, 'README.md'), README);
     writeFileSync(join(root, 'package.json'), PACKAGE_JSON);
     return { ok: true, parent, root };
   } catch {
-    // No path or OS text is surfaced: this is a test mod, and the failure is
-    // simply "the fixture could not be created".
-    return { ok: false };
+    if (parent === undefined) {
+      // Nothing was created, so there is nothing to remove.
+      return { ok: false, cleanupFailed: false };
+    }
+    try {
+      // Only the directory this invocation created is removed.
+      rmSync(parent, { recursive: true, force: true });
+      return { ok: false, cleanupFailed: false };
+    } catch {
+      return { ok: false, cleanupFailed: true };
+    }
   }
 }
 
@@ -70,14 +86,18 @@ export default function previewMod(cmd: ModApi): void {
     handler: async ({ ui }) => {
       const fixture = createFixture();
       if (!fixture.ok) {
-        return {
-          message: [
-            'Repository preview — not started',
-            '',
-            'The disposable preview project could not be created, so nothing was read.',
-            'This is the fail-closed path: no repository content is touched without an owned fixture.',
-          ].join('\n'),
-        };
+        const lines = [
+          'Repository preview — not started',
+          '',
+          'The disposable preview project could not be created, so nothing was read.',
+          'This is the fail-closed path: no repository content is touched without an owned fixture.',
+        ];
+        if (fixture.cleanupFailed) {
+          // Bounded and path-free: the reader is told something may be left
+          // behind, not where it is.
+          lines.push('A partially created temporary directory may remain under the system temp directory.');
+        }
+        return { message: lines.join('\n') };
       }
       try {
         const result = await runRepositoryPreview({
