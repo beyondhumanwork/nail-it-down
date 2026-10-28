@@ -59,6 +59,7 @@ export type TransitionErrorCode =
   | 'retains-answer'
   | 'not-deferred'
   | 'approved-session'
+  | 'paused-session'
   | 'not-confirmed'
   | 'not-ready';
 
@@ -108,6 +109,22 @@ function guardSession(value: unknown): { ok: true; session: Session } | { ok: fa
  */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A paused interview accepts no changes until it is explicitly resumed.
+ *
+ * Every mutating transition runs through this, so the rule holds in the core
+ * rather than depending on a surface hiding the actions. `pauseSession` and
+ * `resumeSession` deliberately do not use it: they are the transitions that
+ * move a session into and out of the paused state.
+ */
+function pausedBarrier(session: Session): TransitionResult | undefined {
+  if (session.status !== 'paused') return undefined;
+  return fail(
+    'paused-session',
+    'this interview is paused; resume it before changing or approving anything',
+  );
 }
 
 /**
@@ -284,6 +301,9 @@ export function answerDecision(
   if (!guarded.ok) return guarded;
   const current = guarded.session;
 
+  const paused = pausedBarrier(current);
+  if (paused !== undefined) return paused;
+
   const target = current.decisions.find((decision) => decision.id === decisionId);
   if (target === undefined) {
     return fail('unknown-decision', `there is no decision ${decisionId} in this session`, { decisionId });
@@ -389,6 +409,9 @@ export function deferDecision(session: Session, decisionId: string, now: string)
   if (!guarded.ok) return guarded;
   const current = guarded.session;
 
+  const paused = pausedBarrier(current);
+  if (paused !== undefined) return paused;
+
   const target = current.decisions.find((decision) => decision.id === decisionId);
   if (target === undefined) {
     return fail('unknown-decision', `there is no decision ${decisionId} in this session`, { decisionId });
@@ -436,6 +459,9 @@ export function reconsiderDeferred(session: Session, decisionId: string, now: st
   const guarded = guardSession(session);
   if (!guarded.ok) return guarded;
   const current = guarded.session;
+
+  const paused = pausedBarrier(current);
+  if (paused !== undefined) return paused;
 
   const target = current.decisions.find((decision) => decision.id === decisionId);
   if (target === undefined) {
@@ -662,6 +688,9 @@ export function approveSession(
   const guarded = guardSession(session);
   if (!guarded.ok) return guarded;
   const current = guarded.session;
+
+  const paused = pausedBarrier(current);
+  if (paused !== undefined) return paused;
 
   if (!isRecord(confirmation) || confirmation.confirmed !== true) {
     return fail('not-confirmed', 'approval needs an explicit confirmation from the user');

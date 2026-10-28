@@ -697,6 +697,37 @@ describe('explicit approval', () => {
   });
 });
 
+describe('paused interviews refuse changes', () => {
+  function paused(): Session {
+    const result = pauseSession(session([answered('d1'), decision('d2'), decision('d3', { priority: 'minor' })]), LATER);
+    if (!result.ok) throw new Error(result.error.message);
+    return result.session;
+  }
+
+  it('a paused interview accepts no answer, deferral or reconsideration', () => {
+    const current = paused();
+    expectFail(answerDecision(current, 'd2', { text: 'Just me' }, LATER), 'paused-session');
+    expectFail(deferDecision(current, 'd3', LATER), 'paused-session');
+    // d1 is not deferred, so reconsideration would normally be refused as
+    // `not-deferred`; the paused barrier is what answers first.
+    expectFail(reconsiderDeferred(current, 'd1', LATER), 'paused-session');
+  });
+
+  it('a paused interview cannot be approved', () => {
+    const current = paused();
+    // Ready as far as readiness is concerned, and still refused.
+    expectFail(approveSession(current, { confirmed: true }, LATER), 'paused-session');
+  });
+
+  it('the paused session is left exactly as it was', () => {
+    const current = paused();
+    const snapshot = structuredClone(current);
+    answerDecision(current, 'd2', { text: 'Just me' }, LATER);
+    approveSession(current, { confirmed: true }, LATER);
+    assert.deepEqual(current, snapshot);
+  });
+});
+
 describe('safety', () => {
   it('22. invalid operations leave the input session unchanged', () => {
     const before = session([
