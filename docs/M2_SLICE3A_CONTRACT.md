@@ -1,6 +1,6 @@
 # M2 Slice 3A — isolated interactive evidence preview
 
-**Decision:** APPROVED for M2 Slice 3A only — 2026-10-28.  
+**Historical authorization:** M2 Slice 3A implementation was approved here on 2026-10-28. **Current disposition:** accepted only for isolated synthetic-workspace preview feasibility; see [M2 Slice 3A acceptance](M2_SLICE3A_ACCEPTANCE.md).  
 **Verified baseline:** `main` at `3a43ca00dc7c96984bcf0a894f4997bdcae622ed`, after [M2 Slice 2 synthetic acceptance](M2_SLICE2_ACCEPTANCE.md).  
 **Goal:** Demonstrate the complete interaction: **explicit consent → bounded OS read of a disposable synthetic project → mechanically verified evidence → human-readable TUI result**, with a refusal/idea-only alternative.
 
