@@ -27,11 +27,11 @@
 **Nail It Down** is a planned [Command Code](https://commandcode.ai/) mod that catches expensive decisions before your coding agent turns them into code. You bring a rough idea. It asks the few questions that matter, and hands back a brief that a developer or an agent can build from.
 
 > [!WARNING]
-> **Pre-alpha. Not installable yet.** We're proving the basic integration with Command Code. Everything below describes what we plan to build, not what exists.
+> **Pre-alpha. Not installable yet.** The first host milestone is done; the interview engine is still being built. Everything below describes what we plan to build, not what exists.
 
 |                        |                                                |
 | :--------------------- | :--------------------------------------------- |
-| **Status**             | Pre-alpha. Working on milestone **M0**         |
+| **Status**             | Pre-alpha. M0 merged; M1 in progress           |
 | **Works with**         | [Command Code](https://commandcode.ai/)        |
 | **Install**            | Not available yet                              |
 | **Needs repo access?** | No. Optional and bounded, only if you allow it |
@@ -189,13 +189,16 @@ Not yet. We'll publish installation instructions once we've tested a working ver
 
 ## Where things stand
 
-We're working on **M0**, the smallest useful test: can Command Code load `/naildown`, ask a question, save the answer, and recover it after a restart?
+**M0 is done.** Command Code loads the mod, `/naildown` asks a question, saves the answer, and recovers it after a restart. Nothing else is shipped.
 
-That's all for now. We'll publish installation instructions once something works.
+**M1 is in progress.** It adds the deterministic interview core: a versioned decision schema, a dependency graph, and the state transitions that record answers, invalidate what a change made stale, and keep approval separate from readiness. It is a pure TypeScript module with unit tests, not yet wired into the mod.
+
+We still haven't published anything you can install.
 
 | Milestone | Question it answers                                          | Status        |
 | :-------- | :----------------------------------------------------------- | :------------ |
-| **M0**    | Can Command Code load `/naildown`, ask a question, save an answer, and recover it after a restart? | 🚧 In progress |
+| **M0**    | Can Command Code load `/naildown`, ask a question, save an answer, and recover it after a restart? | ✅ Done        |
+| **M1**    | Can the interview hold real decisions, respect dependencies, and refuse approval it hasn't earned? | 🚧 In progress |
 
 The work is public:
 
@@ -212,7 +215,7 @@ A few good places to start:
 
 - **Share a real example.** Has an agent ever made a decision for you without telling you? Open an issue describing it. Those are exactly the cases this mod should learn to catch.
 - **Read the drafts.** The [product specification](docs/PRODUCT_SPEC_DRAFT.md) and [architecture decisions](docs/ARCHITECTURE_DECISIONS.md) are still open to feedback.
-- **Help with M0.** The [acceptance tests](docs/M0_ACCEPTANCE.md) show what "working" means for the first milestone.
+- **Help with M1.** The [roadmap](docs/ROADMAP.md) shows where the interview core is going. The [M0 acceptance tests](docs/M0_ACCEPTANCE.md) show what "working" means for the host integration that is already done.
 
 ## Prior art and licensing
 
