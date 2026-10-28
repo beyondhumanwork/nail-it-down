@@ -4,9 +4,9 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha**. M0 and M1 are technically accepted; M2 Slices 1–2 are merged and Slice 2 is accepted for synthetic-root feasibility only (`docs/M2_SLICE2_ACCEPTANCE.md`). **M2 Slice 3A only** is newly authorized for an **isolated, synthetic-workspace, interactive evidence preview** under `docs/M2_SLICE3A_CONTRACT.md`. No real-project reads, installed `/naildown` integration, M2 Slice 3B+, models, persisted evidence, CI, beta or release are authorized. The v0.1 specification remains draft.
+- Current phase: **pre-alpha**. M0 and M1 are technically accepted; M2 Slices 1–3A are merged, with Slice 3A **accepted only for an isolated synthetic-workspace interactive evidence preview** (`docs/M2_SLICE3A_ACCEPTANCE.md`). Real project reads, installed `/naildown` integration, M2 Slice 3B+, model calls, persisted evidence, CI, beta and release remain unauthorized. M2 as a whole is not yet accepted; the full v0.1 specification remains draft.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
-- The full PRD and broader architecture remain **proposed**. Accepted implementation covers M0, M1 and M2 Slices 1–2 under their scopes; only the synthetic, test-mod-only **M2 Slice 3A** preview is additionally authorized. See `docs/M2_SLICE3A_CONTRACT.md`, `docs/M2_SLICE2_ACCEPTANCE.md`, `docs/M2_SLICE1_CONTRACT.md`, and `docs/M1_ACCEPTANCE.md`. M2 overall, live repo access, models, exports and later milestones are not approved.
+- The full PRD and broader architecture remain **proposed**. Accepted scope covers M0, M1 and M2 Slices 1–3A only, subject to their technical acceptance documents. See `docs/M2_SLICE3A_ACCEPTANCE.md`, `docs/M2_SLICE3A_CONTRACT.md`, `docs/M2_SLICE2_ACCEPTANCE.md`, and `docs/M1_ACCEPTANCE.md`. M2 overall, live repository access, exports, models and later milestones are not approved.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
 
 ## Scope and architecture
