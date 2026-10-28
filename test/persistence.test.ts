@@ -1,10 +1,19 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { readRecord, storeKeyFor, writeRecord } from '../src/core/persistence.ts';
+import {
+  readRecord,
+  readSession,
+  removeSession,
+  sessionKeyFor,
+  storeKeyFor,
+  writeRecord,
+  writeSession,
+} from '../src/core/persistence.ts';
 import type { KeyValueStore } from '../src/core/persistence.ts';
 import { startRecord } from '../src/core/record.ts';
 import { workspaceKeyFrom } from '../src/core/workspace.ts';
+import { createInterviewSession } from '../src/core/interview.ts';
 
 function memoryStore(initial: Record<string, unknown> = {}): KeyValueStore & { data: Map<string, unknown> } {
   const data = new Map<string, unknown>(Object.entries(initial));
@@ -85,5 +94,56 @@ describe('workspace isolation through the store', () => {
 
     assert.equal(one.kind === 'ok' ? one.record.goal : 'missing', 'One');
     assert.equal(two.kind === 'ok' ? two.record.goal : 'missing', 'Two');
+  });
+});
+
+describe('v2 session storage', () => {
+  it('keeps v1 and v2 under separate keys so neither overwrites the other', async () => {
+    const store = memoryStore();
+    const workspace = workspaceKeyFrom('/work/one');
+
+    await writeRecord(store, startRecord({ workspace, goal: 'Legacy goal', now: 'now' }));
+    const session = createInterviewSession({ id: 's1', workspace, goal: 'New goal', now: 'now' });
+    await writeSession(store, session);
+
+    assert.notEqual(storeKeyFor(workspace), sessionKeyFor(workspace));
+    assert.equal(readRecord(store, workspace).kind, 'ok');
+    const read = readSession(store, workspace);
+    assert.equal(read.kind, 'ok');
+    if (read.kind === 'ok') assert.equal(read.session.goal, 'New goal');
+  });
+
+  it('round-trips a session and validates it on read', async () => {
+    const store = memoryStore();
+    const workspace = workspaceKeyFrom('/work/one');
+    const session = createInterviewSession({ id: 's1', workspace, goal: 'Goal', now: 'now' });
+
+    await writeSession(store, session);
+    const read = readSession(store, workspace);
+    assert.equal(read.kind, 'ok');
+    if (read.kind !== 'ok') return;
+    assert.equal(read.session.id, 's1');
+    assert.equal(read.session.decisions.length, 3);
+  });
+
+  it('reports corrupt v2 data as unreadable rather than throwing', () => {
+    const store = memoryStore({ [sessionKeyFor('/work/one')]: { schemaVersion: 2, id: 'broken' } });
+    const read = readSession(store, '/work/one');
+    assert.equal(read.kind, 'unreadable');
+  });
+
+  it('returns empty when nothing is saved for the workspace', () => {
+    assert.equal(readSession(memoryStore(), '/work/none').kind, 'empty');
+  });
+
+  it('removes only the v2 key', async () => {
+    const store = memoryStore();
+    const workspace = workspaceKeyFrom('/work/one');
+    await writeRecord(store, startRecord({ workspace, goal: 'Legacy', now: 'now' }));
+    await writeSession(store, createInterviewSession({ id: 's1', workspace, goal: 'G', now: 'now' }));
+
+    await removeSession(store, workspace);
+    assert.equal(readSession(store, workspace).kind, 'empty');
+    assert.equal(readRecord(store, workspace).kind, 'ok');
   });
 });

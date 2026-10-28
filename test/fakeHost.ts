@@ -11,7 +11,7 @@
  * Sharing one `data` map between two hosts is how a process restart is simulated.
  */
 
-import { APPROVAL } from '../src/core/copy.ts';
+import { ACTIONS, APPROVAL, TITLES } from '../src/core/copy.ts';
 import type {
   CommandContext,
   CommandHandler,
@@ -34,6 +34,12 @@ export type FakeHostOptions = {
   selectAnswers?: Array<string | undefined>;
   /** Answers handed to the approval dialog, in order. */
   approvalAnswers?: Array<string | undefined>;
+  /**
+   * Answers handed to the "what next?" action menu, in order. Unscripted, this
+   * falls to "nothing for now", which is what a person pressing Esc does — so a
+   * test that only cares about the interview does not have to script it.
+   */
+  actionAnswers?: Array<string | undefined>;
   /** 1-based ordinals of store writes that should reject, after updating the in-memory map. */
   failWritesAt?: number[];
 };
@@ -59,6 +65,7 @@ export class FakeHost implements ModApi {
 
   private readonly selectAnswers: Array<string | undefined>;
   private readonly approvalAnswers: Array<string | undefined>;
+  private readonly actionAnswers: Array<string | undefined>;
   private readonly failWritesAt: Set<number>;
   private writeCount = 0;
 
@@ -67,6 +74,7 @@ export class FakeHost implements ModApi {
     this.data = options.data ?? new Map();
     this.selectAnswers = [...(options.selectAnswers ?? [])];
     this.approvalAnswers = [...(options.approvalAnswers ?? [])];
+    this.actionAnswers = [...(options.actionAnswers ?? [])];
     this.failWritesAt = new Set(options.failWritesAt ?? []);
 
     const headless = options.headless ?? false;
@@ -97,8 +105,12 @@ export class FakeHost implements ModApi {
           return this.approvalAnswers.length === 0 ? APPROVAL.denyLabel : this.approvalAnswers.shift();
         }
 
+        if (input.title === TITLES.action) {
+          return this.actionAnswers.length === 0 ? ACTIONS.doneLabel : this.actionAnswers.shift();
+        }
+
         if (this.selectAnswers.length === 0) {
-          throw new Error('FakeHost: no scripted question answer left');
+          throw new Error(`FakeHost: no scripted answer left for "${input.title}"`);
         }
         return this.selectAnswers.shift();
       },
@@ -110,11 +122,15 @@ export class FakeHost implements ModApi {
   }
 
   get questionCalls(): SelectCall[] {
-    return this.selectCalls.filter((call) => call.title !== APPROVAL.title);
+    return this.selectCalls.filter((call) => call.title !== APPROVAL.title && call.title !== TITLES.action);
   }
 
   get approvalCalls(): SelectCall[] {
     return this.selectCalls.filter((call) => call.title === APPROVAL.title);
+  }
+
+  get actionCalls(): SelectCall[] {
+    return this.selectCalls.filter((call) => call.title === TITLES.action);
   }
 
   addCommand(command: RegisteredCommand): Disposable {
