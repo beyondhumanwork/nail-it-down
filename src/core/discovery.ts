@@ -380,15 +380,95 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /xox[baprs]-[A-Za-z0-9-]{10,}/,                    // Slack tokens
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,              // private key material
   /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,     // JWT-ish
-  // Long base64 blob. Requires mixed case *and* a digit so an ordinary long
-  // word or a repeated character is not mistaken for a secret: a blunt
-  // 40-character rule refused legitimate files as credential-like.
-  /(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}/,
 ];
+
+/** Shortest base64-like run worth calling a credential. */
+const BASE64_RUN_MIN = 40;
+
+/** A token carries at most this much `=` padding before the run ends. */
+const BASE64_PADDING = 2;
+
+const CODE_PLUS = 43;
+const CODE_SLASH = 47;
+const CODE_ZERO = 48;
+const CODE_NINE = 57;
+const CODE_UPPER_A = 65;
+const CODE_UPPER_Z = 90;
+const CODE_LOWER_A = 97;
+const CODE_LOWER_Z = 122;
+const CODE_PADDING = 61;
+
+/**
+ * Long base64-like runs that mix case *and* contain a digit, as `[start, end)`
+ * spans covering the run plus up to two `=` padding characters.
+ *
+ * This is a forward scan rather than the regular expression it replaced:
+ *
+ *   /(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}/
+ *
+ * That pattern was quadratic on a long homogeneous run. When the run lacks one
+ * required class - a 32 KiB run of lowercase letters has no uppercase - each of
+ * the three lookaheads re-scans to the end of the run from every starting
+ * position, so the cost is O(n^2): measured 1,330 ms for a single 32 KiB run on
+ * Node 24, and the policy reads up to six such files per selection.
+ *
+ * The two are equivalent: a run matches exactly when its whole length is at
+ * least 40 *and* it contains all three classes. A suffix can only contain all
+ * three when the whole run does, and position zero always has 40 characters
+ * available in a run that long, so the leftmost match is always the run itself.
+ * `test/discovery.test.ts` compares this against the expression above.
+ */
+function findBase64LikeSecrets(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+  let index = 0;
+
+  while (index < text.length) {
+    if (!isBase64Char(text.charCodeAt(index))) {
+      index += 1;
+      continue;
+    }
+
+    const start = index;
+    let hasUppercase = false;
+    let hasLowercase = false;
+    let hasDigit = false;
+
+    while (index < text.length) {
+      const code = text.charCodeAt(index);
+      if (code >= CODE_UPPER_A && code <= CODE_UPPER_Z) hasUppercase = true;
+      else if (code >= CODE_LOWER_A && code <= CODE_LOWER_Z) hasLowercase = true;
+      else if (code >= CODE_ZERO && code <= CODE_NINE) hasDigit = true;
+      else if (code !== CODE_PLUS && code !== CODE_SLASH) break;
+      index += 1;
+    }
+
+    // A long word or a repeated character is not a secret: requiring all three
+    // classes is what keeps an ordinary long identifier out of this rule.
+    if (index - start < BASE64_RUN_MIN || !hasUppercase || !hasLowercase || !hasDigit) continue;
+
+    let end = index;
+    for (let pad = 0; pad < BASE64_PADDING && end < text.length && text.charCodeAt(end) === CODE_PADDING; pad += 1) {
+      end += 1;
+    }
+    spans.push([start, end]);
+    index = end;
+  }
+
+  return spans;
+}
+
+function isBase64Char(code: number): boolean {
+  return (code >= CODE_ZERO && code <= CODE_NINE)
+    || (code >= CODE_UPPER_A && code <= CODE_UPPER_Z)
+    || (code >= CODE_LOWER_A && code <= CODE_LOWER_Z)
+    || code === CODE_PLUS
+    || code === CODE_SLASH;
+}
 
 /** True when the text contains something that looks like a credential. */
 export function containsSecretLikeContent(text: string): boolean {
-  return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  return findBase64LikeSecrets(text).length > 0;
 }
 
 /**
@@ -401,7 +481,19 @@ export function redactSecrets(text: string): string {
   for (const pattern of SECRET_PATTERNS) {
     output = output.replace(new RegExp(pattern.source, 'g'), '[redacted]');
   }
-  return output;
+
+  // The base64-like rule runs last, as the pattern it replaced did, so a run that
+  // only becomes visible after an earlier redaction is still caught.
+  const spans = findBase64LikeSecrets(output);
+  if (spans.length === 0) return output;
+
+  let redacted = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    redacted += output.slice(cursor, start) + '[redacted]';
+    cursor = end;
+  }
+  return redacted + output.slice(cursor);
 }
 
 /** Strict UTF-8 decoding. Invalid sequences are refused, never replaced. */
