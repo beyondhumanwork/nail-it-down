@@ -1039,6 +1039,25 @@ describe('secrets: base64-like rule matches the expression it replaced', () => {
     ['aws', ['AKIA', 'ABCDEFGHIJKLMNOP'].join('')],
     ['github', ['ghp', '_', 'a'.repeat(32)].join('')],
     ['jwt-ish', ['eyJ', 'hbGciOiJIUzI1NiJ9', '.', 'eyJzdWIiOiIxMjM0In0', '.'].join('')],
+    ['jwt header 9, too short', 'eyJ' + 'a'.repeat(9) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt header 10, exactly enough', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt header 11', 'eyJ' + 'a'.repeat(11) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt payload 9, too short', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(9) + '.'],
+    ['jwt missing the trailing dot', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10)],
+    ['jwt missing every dot', 'eyJ' + 'a'.repeat(30)],
+    ['jwt two tokens', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.' + ' ' + 'eyJ' + 'c'.repeat(10) + '.' + 'd'.repeat(10) + '.'],
+    ['jwt in prose', 'note the token eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '. thanks'],
+    ['jwt prefix repeated, no dots', 'eyJ'.repeat(40)],
+    ['jwt prefix then a short run', 'eyJeyJa'],
+    ['jwt with underscore and hyphen', 'eyJ' + '_'.repeat(5) + '-'.repeat(5) + '.' + '_'.repeat(10) + '.'],
+    ['jwt adjacent to class chars', 'zzzeyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.zzz'],
+    // Each of these three was found by mutation testing: removing the guard they
+    // exercise left every test green, which meant the guard was untested.
+    ['jwt space where the first dot belongs', 'eyJ' + 'a'.repeat(10) + ' ' + 'b'.repeat(10) + '.'],
+    ['jwt dot immediately after the prefix', 'eyJ' + '.' + 'b'.repeat(10) + '.'],
+    ['jwt nested prefix inside the header', 'eyJ' + 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt dot, run, dot, run, dot', 'eyJ' + '.' + 'b'.repeat(10) + '.' + 'c'.repeat(10) + '.'],
+    ['jwt space after the first dot', 'eyJ' + 'a'.repeat(10) + '.' + ' ' + 'b'.repeat(10) + '.'],
   ];
 
   it('agrees with the oracle on handwritten boundary cases', () => {
@@ -1060,6 +1079,67 @@ describe('secrets: base64-like rule matches the expression it replaced', () => {
       assert.equal(containsSecretLikeContent(text), oracleDetects(text), `detect case ${caseIndex}: ${JSON.stringify(text)}`);
       assert.equal(redactSecrets(text), oracleRedact(text), `redact case ${caseIndex}: ${JSON.stringify(text)}`);
     }
+  });
+
+  it('agrees with the oracle on text dense in JWT prefixes', () => {
+    // The shape that made the replaced expression quadratic: `eyJ` everywhere and
+    // almost no delimiters. Correctness has to survive it, not just speed.
+    const tokens = ['eyJ', 'a', 'A', '0', '_', '-', '.', ' ', 'x'];
+    const random = lcg(0x1e7);
+    for (let caseIndex = 0; caseIndex < 200; caseIndex += 1) {
+      const pieces = Math.floor(random() * 24);
+      let text = '';
+      for (let i = 0; i < pieces; i += 1) {
+        text += tokens[Math.floor(random() * tokens.length)];
+      }
+      assert.equal(containsSecretLikeContent(text), oracleDetects(text), `detect case ${caseIndex}: ${JSON.stringify(text)}`);
+      assert.equal(redactSecrets(text), oracleRedact(text), `redact case ${caseIndex}: ${JSON.stringify(text)}`);
+    }
+  });
+
+  it('agrees with the oracle on every six-part composition of the decisive pieces', () => {
+    // Six slots so the full shape lands in scope: prefix, a minimum-length run,
+    // the delimiter, and a near-delimiter. Four guards only fail on specific
+    // arrangements of these, and they were each found by mutation testing.
+    const parts = ['eyJ', 'a'.repeat(10), '.', ' '];
+    const walk = (remaining: number, built: string): void => {
+      if (remaining === 0) {
+        assert.equal(containsSecretLikeContent(built), oracleDetects(built), `detect: ${JSON.stringify(built)}`);
+        assert.equal(redactSecrets(built), oracleRedact(built), `redact: ${JSON.stringify(built)}`);
+        return;
+      }
+      for (const part of parts) walk(remaining - 1, built + part);
+    };
+    walk(6, '');
+  });
+
+  it('agrees with the oracle on every short composition of JWT pieces', () => {
+    // Exhaustive over the pieces that decide a boundary: the prefix, a run at the
+    // minimum length, one just under it, the delimiter, near-delimiters, and a
+    // class character. Exhaustive rather than random, because the three guards
+    // that matter only fail on specific compositions.
+    const parts = ['eyJ', 'a'.repeat(10), 'a'.repeat(9), '.', ' ', '_', '-', 'X'];
+    const compose = (count: number, prefix: string): void => {
+      if (count === 0) {
+        assert.equal(containsSecretLikeContent(prefix), oracleDetects(prefix), `detect: ${JSON.stringify(prefix)}`);
+        assert.equal(redactSecrets(prefix), oracleRedact(prefix), `redact: ${JSON.stringify(prefix)}`);
+        return;
+      }
+      for (const part of parts) compose(count - 1, prefix + part);
+    };
+    for (let length = 3; length <= 4; length += 1) compose(length, '');
+  });
+
+  it('stays linear on JWT prefix runs', () => {
+    // Guards the second quadratic the review found: 32 KiB of `eyJ` repeats cost
+    // ~840 ms per call before this change. Generous bound; the oracle above is the
+    // correctness test.
+    const text = 'eyJ'.repeat(Math.ceil(32_768 / 3)).slice(0, 32_768);
+    const start = performance.now();
+    assert.equal(containsSecretLikeContent(text), false);
+    assert.equal(redactSecrets(text), text);
+    const elapsed = performance.now() - start;
+    assert.ok(elapsed < 250, `32 KiB of eyJ repeats took ${elapsed.toFixed(1)} ms; it was ~840 ms per pass before the change`);
   });
 
   it('keeps a long single-character run out of the rule at every size', () => {

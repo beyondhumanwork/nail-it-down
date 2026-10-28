@@ -109,7 +109,7 @@ Any one of these fails closed to idea-only, with a stated reason and no fallback
 | Root is a symlink | Refuse. A link is an indirection the user did not approve. |
 | Root resolves outside the parent chain the consent displayed | Refuse, name the discrepancy. |
 | Root identity changes between consent and read | Refuse that invocation; do not retry silently. |
-| Root is a network mount or a filesystem whose semantics we have not measured | **Refuse in v0.1.** Local, fixed-semantics filesystems only. Detection is imperfect — see unresolved question 3. |
+| Root is a network mount or a filesystem whose semantics we have not measured | **Refuse in v0.1.** Local, fixed-semantics filesystems only. Node **can** report filesystem statistics (`fs.statfs`, §9.4), but that does not identify a mount reliably on every platform — the pilot must either restrict to a verified platform or take the user's declaration. See unresolved question 3. |
 | Anything other than a regular file at a candidate path | Refuse that candidate: symlink, FIFO, socket, device, directory. |
 | File exceeds any ceiling | Refuse that file; keep the rest; report `total-too-large` / `unreadable` honestly. |
 | Listing fails or is empty | Report "nothing readable" — **never** "the project has no such file". `list` has no error channel today. |
@@ -172,6 +172,7 @@ On the installed runtimes — Node **v24.22.1** (ThinkPad) and **v24.12.0** (Mac
 | `fs.openSync(path, O_RDONLY \| O_NOFOLLOW \| O_NONBLOCK)` | `O_NOFOLLOW` documented as "fail if the path is a symbolic link" — protects the *final* component | Does not protect ancestor components |
 | `fs.fstatSync(fd, {bigint: true})` | Identity of what was *actually opened*: dev, inode, size, mtime, ctime | Says nothing about whether the path still means the same thing |
 | `fs.opendirSync` → `fs.Dir` | Shallow directory iteration | Directory *stream*, not an anchor for opening children |
+| `fs.statfsSync` / `fs.statfs` / `fs.promises.statfs` | Filesystem statistics for the mount containing a path: `type`, `bsize`, `blocks`, `bfree`, `bavail`, `files`, `ffree` | The `type` number is platform-dependent and undocumented; it is **not** a filesystem *name*, and there is no portable mapping (see §9.4) |
 | `fs.constants` | `O_RDONLY`, `O_NOFOLLOW`, `O_DIRECTORY`, `O_NONBLOCK`, `O_NOATIME` (Linux only), … | — |
 
 ### 9.2 What does **not** exist — and this is the crux
@@ -196,12 +197,46 @@ So the guarantee we would need — *open this file relative to a directory handl
 | Same-inode same-size rewrite detected via bigint mtime/ctime | Proven for the tested case; bounded by filesystem timestamp resolution |
 | **A parent directory replaced between `realpath` and `open`** | **NOT PREVENTED.** Detectable; the window is real |
 | **Case-folding / Unicode-normalising filesystems** | **NOT VERIFIED** |
-| **Network / distributed mounts** | **NOT VERIFIED** |
+| **Network / distributed mounts** | **NOT VERIFIED**, and not verifiable with a single API — see §9.4 |
 | **Listing failure distinguishable from an empty directory** | **NO** — `RepositoryReader.list` has no error channel |
 
 These are not gaps we chose; they are gaps the platform imposes. The honest response is to scope the product to where they do not bite, and to say where they do.
 
-### 9.4 The host is not a sandbox either
+### 9.4 Filesystem type: what `fs.statfs` proves and what it does not
+
+Node 24 **does** expose filesystem statistics. `fs.statfs()`, `fs.statfsSync()` and `fs.promises.statfs()` return an `fs.StatFs` object, documented as "Provides information about a mounted file system" and added in v19.6.0 / v18.15.0 (`https://nodejs.org/docs/latest-v24.x/api/fs.html`, retrieved 2026-10-28). The fields are `type`, `bsize`, `blocks`, `bfree`, `bavail`, `files`, `ffree`, and the set is not identical on every platform — macOS omits `frsize`, which Linux exposes.
+
+An earlier revision of this memo said statfs-style detection was "unavailable in Node". **That was wrong**, and it is corrected here.
+
+What the API actually gives, measured on the installed runtimes (2026-10-28):
+
+| Platform | `statfsSync(path).type` | Interpretation |
+|---|---|---|
+| Linux (Node v24.22.1) | `/` → `0xEF53`, `/tmp` → `0x01021994`, `/proc` → `0x9FA0` | The kernel `f_type` magic. `0xEF53` = ext4, `0x01021994` = tmpfs, `0x9FA0` = proc |
+| macOS 13.7.8 (Node v24.12.0) | `/` → `26`, `/dev` → `19`, `/System/Volumes/Preboot` → `26` | A **different, undocumented** numbering. `26` = apfs, `19` = devfs, and `mount(8)` confirms both |
+
+So the number exists everywhere, but **it is not one namespace**. On Linux it is the documented `statfs(2)` magic; on Darwin it is an unrelated code whose mapping is not published, and the platform's real filesystem name — `f_fstypename`, the `"apfs"` / `"nfs"` / `"smbfs"` string that `mount(8)` prints — is **not exposed at all**.
+
+What this means, stated carefully:
+
+- **Proven:** a filesystem-type *number* can be read for a path on both measured platforms.
+- **Not proven:** that any given number means "remote". A table of magics is a Linux-shaped idea; its macOS equivalent would be reverse-engineered, not documented.
+- **Not proven, and more important:** that local-vs-remote is even the right question. A bind mount of an NFS export can present a local filesystem's magic. A FUSE or sshfs mount reports FUSE. A cloud-synced folder (Dropbox, iCloud Drive, OneDrive) is an ordinary local filesystem whose *contents* change out from under a reader. A Samba share and an NFS export may or may not report distinguishable codes depending on kernel and mount options.
+- **Decisively:** a filesystem-type number says **nothing** about whether the mount is trustworthy, whether the user meant to point at it, whether it is immune to concurrent replacement, or whether the root inside it is the one that was consented to. It is not a security control. It is a hint.
+
+**Therefore the v0.1 rule stands unchanged, but for a corrected reason:** the pilot restricts itself to local, fixed-semantics filesystems and takes the user's declaration, and it must **either** verify the platform it runs on **or** say that it cannot verify. It must not present a `type` check as evidence that a workspace is safe.
+
+**Reproducible future probe** (not run in this slice; requires a second machine and disposable fixtures only):
+
+1. On Linux, record `statfsSync` for: a disposable `mkdtemp` directory on ext4, one on tmpfs (`/dev/shm`), and — if a test export can be arranged — one mounted from NFS and one from CIFS. Record the magic for each and confirm against `statfs(2)`.
+2. On macOS, do the same for: a disposable `mkdtemp` directory on APFS, a disposable encrypted disk image (`hdiutil attach` of a throwaway image, never a user volume), and — if available — an SMB or NFS mount. Record `type` **and** the `f_fstypename` that `mount(8)` reports, and note that the string is unavailable to Node.
+3. Cross-check the two tables. If any macOS code collides with a Linux magic (e.g. a small enum value equal to a known magic), that alone disproves the single-table approach.
+4. Record whether any proposed check produces a **false "local"** for a deliberately remote mount. A check that fails that test is not a control.
+5. Restore: unmount and delete every fixture; confirm no user volume was touched.
+
+Until that probe exists on two operating systems, the honest status is **NOT VERIFIED**, and the memo must not imply otherwise.
+
+### 9.5 The host is not a sandbox either
 
 Command Code's own mod documentation is explicit: *"There is no sandbox — install packages you trust."* A mod is arbitrary code in the host process with the developer's full filesystem privileges. Therefore:
 
@@ -313,7 +348,7 @@ Deliberately limited to five.
 
 1. **What is the trustworthy root source?** `cmd.cwd` is a proposal at best (§4). The safest option is a path the user types or picks in the dialog itself. This needs a decision, and it changes the UI.
 2. **Resolve-before-consent or consent-before-resolve?** Showing the canonical path is more honest, but `realpath` is a filesystem operation. §5 chooses consent-first and stops if the resolution surprises us; is that the right trade?
-3. **Can a network mount be detected portably?** `statfs`-style detection is platform-specific and unavailable in Node. v0.1 refuses anything user-declared as remote and cannot verify it — is user declaration enough?
+3. **Can a network mount be detected portably?** Not with what we have. Node exposes `fs.statfs`, so a filesystem-type number is readable (§9.4), but it is a kernel magic on Linux and an unrelated undocumented code on macOS, and it says nothing about trust or concurrent mutation. v0.1 restricts to local filesystems and takes the user's declaration. The decision needed: restrict the pilot to one verified platform, or accept user declaration, or refuse any path the user cannot vouch for?
 4. **Should session-scoped consent exist?** It reduces friction and creates a persistent authority the user must remember. §7 says no for v0.1.
 5. **Who formally accepts the parent-swap risk?** This is an owner decision, not an implementer's. The recommendation is that it be recorded in the pilot's release note, not buried in code comments.
 
@@ -356,6 +391,8 @@ Acceptance of this memo authorizes **a threat model**, not a runtime pilot. A pi
 |---|---|---|
 | `https://nodejs.org/docs/latest-v24.x/api/fs.html` (v24.22.2 docs) | `fs.constants` incl. `O_NOFOLLOW`; path types; `fs.opendir`/`fs.Dir`; absence of any dirfd option | 2026-10-28 |
 | `https://github.com/nodejs/node/issues/31110` | Upstream dirfd request; closed stale 2022-04-04; libuv dependency and `*at` availability | 2026-10-28 |
+| `https://nodejs.org/docs/latest-v24.x/api/fs.html` — `Class: fs.StatFs` | `fs.statfs`/`statfsSync` exist; fields `type`/`bsize`/`frsize`/`blocks`/`bfree`/`bavail`/`files`/`ffree`; `type` has no documented meaning | 2026-10-28 |
+| Installed runtimes, `statfsSync` probe | Linux magics `0xEF53`/`0x01021994`/`0x9FA0`; macOS `type` 26 (apfs) / 19 (devfs) with no name exposed | 2026-10-28 |
 | `https://commandcode.ai/docs/mods` | `ModApi` surface, `cmd.cwd`, "There is no sandbox", trust scoping, headless default-deny | 2026-10-28 |
 | Installed runtimes | Node v24.22.1 / v24.12.0 probes; Command Code v1.88.0 | 2026-10-28 |
 | `src/host/nodeRepositoryReader.ts` | `CONTAINMENT_LIMITS`, descriptor checks, parent-swap note | repository |
