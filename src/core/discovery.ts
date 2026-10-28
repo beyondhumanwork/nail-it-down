@@ -54,6 +54,72 @@ export const DEFAULT_BUDGET: DiscoveryBudget = {
   maxDirectoryEntries: 100,
 };
 
+const BUDGET_FIELDS: readonly (keyof DiscoveryBudget)[] = [
+  'maxFiles',
+  'maxFileBytes',
+  'maxTotalBytes',
+  'maxFileLines',
+  'maxDirectoryEntries',
+];
+
+/**
+ * Resolves a caller's requested budget against the approved ceilings.
+ *
+ * `DEFAULT_BUDGET` is a hard ceiling for Slice 1, not a default that can be
+ * raised: a caller may ask for something smaller, never for more. Anything that
+ * is not a positive finite integer is refused. The diagnostic names the field
+ * and the ceiling but never echoes the supplied value, because a malformed
+ * value is untrusted input too.
+ *
+ * This runs before the reader is touched, so an invalid budget cannot cause a
+ * directory listing or a file read.
+ */
+function resolveBudget(
+  requested: Partial<DiscoveryBudget> | undefined,
+): { ok: true; budget: DiscoveryBudget } | { ok: false; detail: string } {
+  const budget: DiscoveryBudget = { ...DEFAULT_BUDGET };
+  if (requested === undefined) return { ok: true, budget };
+  if (typeof requested !== 'object' || requested === null) {
+    return { ok: false, detail: 'the requested budget must be an object' };
+  }
+
+  for (const field of BUDGET_FIELDS) {
+    const value = (requested as Record<string, unknown>)[field];
+    if (value === undefined) continue;
+
+    const ceiling = DEFAULT_BUDGET[field];
+    if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) {
+      return { ok: false, detail: `${field} must be a whole number` };
+    }
+    if (value < 1) return { ok: false, detail: `${field} must be at least 1` };
+    if (value > ceiling) {
+      return { ok: false, detail: `${field} cannot exceed the approved ceiling of ${ceiling}` };
+    }
+    budget[field] = value;
+  }
+
+  return { ok: true, budget };
+}
+
+/**
+ * Classifies a reader failure into one of a few fixed phrases.
+ *
+ * The reader's message never reaches a caller: an OS adapter would put absolute
+ * paths, filenames or credential fragments in there, and this text is shown to
+ * a person. Mapping to a small closed set keeps it useful for troubleshooting
+ * without letting untrusted strings through.
+ */
+function classifyReadFailure(reason: unknown): string {
+  const text = typeof reason === 'string' ? reason.toUpperCase() : '';
+  if (text.startsWith('EACCES') || text.startsWith('EPERM')) return 'permission denied';
+  if (text.startsWith('EISDIR')) return 'it is a directory';
+  if (text.startsWith('ENOENT')) return 'it disappeared';
+  if (text.startsWith('ELOOP')) return 'too many links';
+  if (text.startsWith('EIO')) return 'the device reported an error';
+  if (text.startsWith('EMFILE') || text.startsWith('ENFILE')) return 'too many open files';
+  return 'the reader did not explain why';
+}
+
 /**
  * Root files this policy will consider, in this order. Order is part of the
  * contract: it is the deterministic candidate ordering, independent of whatever
@@ -214,6 +280,8 @@ export type RejectionReason =
   | 'too-many-files'
   | 'total-too-large'
   | 'too-many-directory-entries'
+  // policy configuration
+  | 'invalid-budget'
   // consent
   | 'no-consent';
 
@@ -401,7 +469,14 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
     };
   }
 
-  const budget: DiscoveryBudget = { ...DEFAULT_BUDGET, ...input.budget };
+  // Budgets are validated before the reader is touched: an invalid or
+  // over-ceiling request must not be able to cause a listing, let alone a read.
+  const validated = resolveBudget(input.budget);
+  if (!validated.ok) {
+    return { kind: 'refused', refusal: { reason: 'invalid-budget', detail: validated.detail } };
+  }
+  const budget = validated.budget;
+
   const entries = input.reader.list('');
 
   if (entries.length > budget.maxDirectoryEntries) {
@@ -460,9 +535,9 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
       rejected.push({
         path: spec.name,
         reason: 'symlink',
-        detail: entry.target === undefined
-          ? 'symlinks are never followed'
-          : `symlinks are never followed (points at ${entry.target})`,
+        // The link target is deliberately not echoed: it is attacker-controlled
+        // text that may be a private absolute path, a token, or a credential.
+        detail: 'a symlink is never followed, whatever it points at',
       });
       continue;
     }
@@ -491,7 +566,13 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
       continue;
     }
     if (read.kind === 'unreadable') {
-      rejected.push({ path: spec.name, reason: 'unreadable', detail: read.reason });
+      // The reader's own message is not echoed: it can carry absolute paths,
+      // filenames, or credential fragments from a future OS-backed adapter.
+      rejected.push({
+        path: spec.name,
+        reason: 'unreadable',
+        detail: `the file could not be read (${classifyReadFailure(read.reason)})`,
+      });
       continue;
     }
 
@@ -566,6 +647,35 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * The only dependency sections this policy understands.
+ *
+ * A name appearing in `scripts`, `description`, `keywords` or any other field is
+ * *not* a dependency declaration, and treating it as one was a real defect: the
+ * first version searched for a quoted name anywhere in the file.
+ */
+export const DEPENDENCY_SECTIONS = [
+  'dependencies',
+  'devDependencies',
+  'peerDependencies',
+  'optionalDependencies',
+] as const;
+
+export type DependencySection = (typeof DEPENDENCY_SECTIONS)[number];
+
+/**
+ * The mechanical thing an item of evidence asserts.
+ *
+ * Evidence carries this rather than free text so re-verification can re-derive
+ * the fact from current structure instead of trusting stored prose. Only one
+ * claim kind is supported, and adding another must come with its own derivation.
+ */
+export type EvidenceAssertion = {
+  kind: 'declared-dependency';
+  dependency: string;
+  section: DependencySection;
+};
+
+/**
  * A bounded, workspace-relative location in a source file. One-based and
  * inclusive, because that is what every editor shows a person.
  */
@@ -576,23 +686,24 @@ export type EvidenceSource = {
 };
 
 export type ProvenanceState =
-  /** Re-read from the reader and still matching. */
+  /** Re-derived from the reader and still matching. */
   | 'verified'
-  /** The source is still there but its content changed since capture. */
+  /** The source is still there but no longer supports the claim. */
   | 'stale'
   /** The source is gone, so the claim can no longer be checked. */
   | 'missing';
 
 /**
- * A claim that is tied to a source.
+ * A claim tied to a source.
  *
  * There is deliberately no `unverified` variant: a claim without a source is not
- * evidence in this model, so `createEvidence` refuses to build one. That makes
- * fabricated provenance a type error rather than a runtime hope.
+ * evidence in this model, so fabricated provenance is a type error rather than a
+ * runtime hope.
  */
 export type Evidence = {
-  /** Short, mechanical, and stated as fact only because a line proves it. */
+  /** Fixed, narrow text derived from the assertion. Never free-form prose. */
   claim: string;
+  assertion: EvidenceAssertion;
   source: EvidenceSource;
   provenance: ProvenanceState;
   /** Bounded, redacted supporting text. Never the whole file. */
@@ -608,6 +719,22 @@ export type EvidenceResult =
   | EvidenceRefusal;
 
 const MAX_EXCERPT_CHARS = 160;
+
+/**
+ * npm's own name shape, bounded to its 214-character limit. Deliberately
+ * restrictive: the name is interpolated into a claim string and a regex, so
+ * anything outside this alphabet is refused rather than escaped.
+ */
+const DEPENDENCY_NAME_PATTERN = /^@?[A-Za-z0-9][A-Za-z0-9._/-]{0,213}$/;
+
+export function isSafeDependencyName(value: unknown): value is string {
+  return typeof value === 'string' && DEPENDENCY_NAME_PATTERN.test(value);
+}
+
+/** The one canonical way to describe this assertion, so stored text cannot drift. */
+function canonicalClaim(assertion: EvidenceAssertion): string {
+  return `package.json lists "${assertion.dependency}" under "${assertion.section}"`;
+}
 
 /** Bounded, single-line, redacted excerpt. */
 function boundedExcerpt(line: string): string {
@@ -627,17 +754,176 @@ function lineText(text: string, line: number): string {
   return text.split('\n')[line - 1] ?? '';
 }
 
+/** Index of the brace closing the object opened at `openIndex`, string-aware. */
+function matchingBrace(text: string, openIndex: number): number | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = openIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return undefined;
+}
+
+type SectionRange =
+  | { kind: 'found'; open: number; close: number }
+  | { kind: 'absent' }
+  | { kind: 'unsupported'; detail: string }
+  | { kind: 'ambiguous'; detail: string };
+
+/**
+ * Locates one dependency section's object literal in the raw text.
+ *
+ * Exactly one occurrence is required. A duplicate `"dependencies": {` block
+ * makes the citation ambiguous — JSON.parse would silently keep the last one,
+ * so guessing a position would be inventing a citation.
+ */
+function findSectionRange(text: string, section: DependencySection): SectionRange {
+  const pattern = new RegExp(`"${section}"\\s*:\\s*\\{`, 'g');
+  const occurrences = [...text.matchAll(pattern)];
+  if (occurrences.length === 0) {
+    // A `"section": "not an object"` shape is unsupported, not absent.
+    const wrongShape = new RegExp(`"${section}"\\s*:\\s*[^\\s{]`).test(text);
+    return wrongShape
+      ? { kind: 'unsupported', detail: `"${section}" is not an object` }
+      : { kind: 'absent' };
+  }
+  if (occurrences.length > 1) {
+    return { kind: 'ambiguous', detail: `more than one "${section}" section` };
+  }
+  const match = occurrences[0];
+  const open = match.index + match[0].length - 1;
+  const close = matchingBrace(text, open);
+  if (close === undefined) {
+    return { kind: 'ambiguous', detail: `the "${section}" section is not closed` };
+  }
+  return { kind: 'found', open, close };
+}
+
+export type DependencyLocation =
+  | { ok: true; section: DependencySection; source: EvidenceSource; excerpt: string }
+  | { ok: false; detail: string };
+
+/**
+ * Establishes, from a manifest's own structure, that it declares a dependency —
+ * and where.
+ *
+ * Two independent checks must agree before anything is claimed:
+ *
+ * 1. `JSON.parse` is the authority on *whether* the declaration exists, in a
+ *    supported section, with a string value.
+ * 2. A bounded text scan of that same section is the authority on *where*,
+ *    because JSON.parse discards positions.
+ *
+ * Both are required. Trusting the scan alone is what produced a false positive
+ * when a name appeared in `scripts`; trusting the parse alone would invent a
+ * line number.
+ */
+export function locateDeclaredDependency(text: string, dependency: string): DependencyLocation {
+  if (!isSafeDependencyName(dependency)) {
+    return { ok: false, detail: 'that is not a dependency name this policy will look for' };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, detail: 'package.json is not valid JSON' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, detail: 'package.json is not a JSON object' };
+  }
+  const root = parsed as Record<string, unknown>;
+
+  let section: DependencySection | undefined;
+  let sawUnsupported = false;
+
+  for (const candidate of DEPENDENCY_SECTIONS) {
+    const block = root[candidate];
+    if (block === undefined) continue;
+    if (typeof block !== 'object' || block === null || Array.isArray(block)) {
+      sawUnsupported = true;
+      continue;
+    }
+    if (!Object.hasOwn(block, dependency)) continue;
+    const value = (block as Record<string, unknown>)[dependency];
+    if (typeof value !== 'string' || value.trim() === '') {
+      sawUnsupported = true;
+      continue;
+    }
+    section = candidate;
+    break;
+  }
+
+  if (section === undefined) {
+    return {
+      ok: false,
+      detail: sawUnsupported
+        ? `${dependency} is declared in an unsupported form`
+        : `${dependency} is not declared in a supported dependency section`,
+    };
+  }
+
+  const range = findSectionRange(text, section);
+  if (range.kind === 'absent') return { ok: false, detail: `package.json has no "${section}" section` };
+  if (range.kind === 'unsupported') return { ok: false, detail: range.detail };
+  if (range.kind === 'ambiguous') return { ok: false, detail: `the citation is ambiguous: ${range.detail}` };
+
+  const inner = text.slice(range.open + 1, range.close);
+  const entryPattern = new RegExp(
+    `"${dependency.replace(/[^A-Za-z0-9]/g, (character) => `\\${character}`)}"\\s*:\\s*"`,
+    'g',
+  );
+  const entries = [...inner.matchAll(entryPattern)];
+  if (entries.length === 0) {
+    // The parse says it is declared but the text cannot show where. Refusing
+    // beats pointing at a plausible-looking line.
+    return { ok: false, detail: `the declaration of ${dependency} could not be located unambiguously` };
+  }
+  if (entries.length > 1) {
+    return { ok: false, detail: `the citation is ambiguous: ${dependency} appears more than once in "${section}"` };
+  }
+
+  const keyOffset = range.open + 1 + entries[0].index;
+  const valueOffset = keyOffset + entries[0][0].length - 1;
+  const lineStart = lineNumberAt(text, keyOffset);
+  const lineEnd = lineNumberAt(text, valueOffset);
+  const excerpt = boundedExcerpt(lineText(text, lineStart));
+
+  // The cited span must actually show the declaration it is cited for.
+  if (!lineText(text, lineStart).includes(`"${dependency}"`)) {
+    return { ok: false, detail: 'the declaration is not on the line it was located at' };
+  }
+
+  return {
+    ok: true,
+    section,
+    source: { path: 'package.json', lineStart, lineEnd },
+    excerpt,
+  };
+}
+
 /**
  * Records a declared dependency from a manifest.
  *
- * This is the exemplar of the only kind of fact this slice will produce: a line
- * in `package.json` says a dependency is declared, so "the manifest declares it"
- * is mechanically true. The same evidence can never support "the feature works",
- * which is why the claim text is fixed and narrow rather than free-form.
- *
- * Documentation is refused as a source on purpose: prose cannot prove a
- * dependency, and treating README text as machine-readable is exactly the
- * confusion this milestone exists to prevent.
+ * The claim is narrow on purpose: the manifest *lists* the name in a dependency
+ * section. It says nothing about whether the package is installed, whether it
+ * works, or whether anything uses it — none of which a line of JSON can prove.
  */
 export function declaredDependencyEvidence(input: {
   reader: RepositoryReader;
@@ -651,8 +937,8 @@ export function declaredDependencyEvidence(input: {
       refusal: { reason: 'no-consent', detail: 'repository inspection needs explicit consent' },
     };
   }
-  if (typeof input.dependency !== 'string' || input.dependency.trim() === '') {
-    return { kind: 'not-substantiated', detail: 'a dependency name is required' };
+  if (!isSafeDependencyName(input.dependency)) {
+    return { kind: 'not-substantiated', detail: 'that is not a dependency name this policy will look for' };
   }
 
   const selection = selectCandidates({ reader: input.reader, consent: input.consent, budget: input.budget });
@@ -670,66 +956,92 @@ export function declaredDependencyEvidence(input: {
     };
   }
 
-  const needle = `"${input.dependency}"`;
-  const offset = manifest.text.indexOf(needle);
-  if (offset === -1) {
-    return {
-      kind: 'not-substantiated',
-      detail: `"${input.dependency}" does not appear in package.json`,
-    };
-  }
+  const located = locateDeclaredDependency(manifest.text, input.dependency);
+  if (!located.ok) return { kind: 'not-substantiated', detail: located.detail };
 
-  const line = lineNumberAt(manifest.text, offset);
-  const excerpt = boundedExcerpt(lineText(manifest.text, line));
+  const assertion: EvidenceAssertion = {
+    kind: 'declared-dependency',
+    dependency: input.dependency,
+    section: located.section,
+  };
 
   return {
     kind: 'evidence',
     evidence: {
-      claim: `package.json declares a dependency named "${input.dependency}"`,
-      source: { path: manifest.path, lineStart: line, lineEnd: line },
+      claim: canonicalClaim(assertion),
+      assertion,
+      source: located.source,
       provenance: 'verified',
-      excerpt,
+      excerpt: located.excerpt,
     },
   };
 }
 
-/**
- * Re-checks an existing piece of evidence against the current reader.
- *
- * This is how a captured fact becomes honest after the world moves: the source
- * is re-read, the line is compared, and the result is `verified`, `stale` or
- * `missing`. It never upgrades a claim, and it never repairs one by searching
- * elsewhere.
- *
- * `evidence` is typed `unknown` on purpose. A record that came back from storage
- * is not trustworthy input, and a fabricated or malformed citation must be
- * reported as unverifiable rather than crashing or being silently promoted to
- * `verified`.
- */
+// ---------------------------------------------------------------------------
+// Re-verification
+// ---------------------------------------------------------------------------
+
 export type ReverifyResult =
   | { kind: 'reverified'; evidence: Evidence }
   | { kind: 'not-verifiable'; detail: string };
 
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isDependencyAssertion(value: unknown): value is EvidenceAssertion {
+  if (!isRecordLike(value)) return false;
+  if (value.kind !== 'declared-dependency') return false;
+  if (!isSafeDependencyName(value.dependency)) return false;
+  return (DEPENDENCY_SECTIONS as readonly string[]).includes(value.section as string);
+}
+
+/**
+ * Validates a stored record before it is allowed to cause a read.
+ *
+ * A record read back from anywhere is untrusted input. Everything it can steer —
+ * the path, the assertion kind, the claim text — is checked against the policy,
+ * and the claim must be exactly the canonical text for its assertion so that
+ * arbitrary prose cannot ride along on a genuine citation.
+ */
 function isEvidenceLike(value: unknown): value is Evidence {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.claim !== 'string' || candidate.claim.trim() === '') return false;
-  if (typeof candidate.excerpt !== 'string') return false;
-  if (candidate.provenance !== 'verified' && candidate.provenance !== 'stale' && candidate.provenance !== 'missing') {
+  if (!isRecordLike(value)) return false;
+  if (!isDependencyAssertion(value.assertion)) return false;
+  if (typeof value.claim !== 'string' || value.claim !== canonicalClaim(value.assertion)) return false;
+  if (typeof value.excerpt !== 'string') return false;
+  if (value.provenance !== 'verified' && value.provenance !== 'stale' && value.provenance !== 'missing') {
     return false;
   }
-  const source = candidate.source;
-  if (typeof source !== 'object' || source === null) return false;
-  const { path, lineStart, lineEnd } = source as Record<string, unknown>;
+  if (!isRecordLike(value.source)) return false;
+  const { path, lineStart, lineEnd } = value.source;
   if (typeof path !== 'string' || path === '') return false;
   if (typeof lineStart !== 'number' || !Number.isInteger(lineStart) || lineStart < 1) return false;
   if (typeof lineEnd !== 'number' || !Number.isInteger(lineEnd) || lineEnd < lineStart) return false;
   return true;
 }
 
+/**
+ * Re-checks a stored piece of evidence against the current reader.
+ *
+ * The order matters and is the point of this function:
+ *
+ * 1. Validate the record. A malformed one is reported, never read.
+ * 2. Refuse without consent — and without touching the reader at all, so a
+ *    consent-less call cannot even disclose which paths exist.
+ * 3. Validate the cited path against the same policy the reader uses. A forged
+ *    citation pointing at `.env`, an absolute path, a traversal or a
+ *    non-allowlisted name is rejected **before** any reader call, so a forbidden
+ *    path is never read merely to discover it is forbidden.
+ * 4. Re-run the full selection, which re-applies entry type, symlink, encoding,
+ *    size, line, total and secret checks.
+ * 5. Re-derive the assertion from the manifest's own structure and compare. The
+ *    excerpt is compared for equality rather than as a prefix, so a tampered
+ *    excerpt cannot inherit a verified state.
+ */
 export function reverifyEvidence(input: {
   reader: RepositoryReader;
   consent: ConsentDecision | undefined;
+  budget?: Partial<DiscoveryBudget>;
   evidence: unknown;
 }): ReverifyResult {
   if (!isEvidenceLike(input.evidence)) {
@@ -737,26 +1049,62 @@ export function reverifyEvidence(input: {
   }
   const original = input.evidence;
 
+  // No consent: read nothing, and never hand back a fresh verified claim.
   if (!hasConsent(input.consent)) {
-    // Without consent nothing can be re-read, so the claim cannot stand as
-    // verified. `stale` is the truthful state: it was once captured, and it can
-    // no longer be confirmed.
     return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
   }
 
-  const read = input.reader.read(original.source.path);
-  if (read.kind === 'missing') return { kind: 'reverified', evidence: { ...original, provenance: 'missing' } };
-  if (read.kind === 'unreadable') return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
+  // Path policy first: pure, so a forbidden path causes zero reader calls.
+  const inspection = inspectCandidatePath(original.source.path);
+  if (!inspection.ok) {
+    return {
+      kind: 'not-verifiable',
+      detail: `the cited source is not a path this policy reads (${inspection.rejection.reason})`,
+    };
+  }
 
-  const text = decodeUtf8(read.bytes);
-  if (text === undefined) return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
-  if (containsSecretLikeContent(text)) return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
+  const selection = selectCandidates({
+    reader: input.reader,
+    consent: input.consent,
+    budget: input.budget,
+  });
+  if (selection.kind === 'refused') {
+    return { kind: 'not-verifiable', detail: `the source cannot be re-read (${selection.refusal.reason})` };
+  }
 
-  const line = lineText(text, original.source.lineStart);
-  const stillMatches = redactSecrets(line.trim().replace(/\s+/g, ' ')).startsWith(
-    original.excerpt.replace(/…$/, ''),
-  );
-  return { kind: 'reverified', evidence: { ...original, provenance: stillMatches ? 'verified' : 'stale' } };
+  const rejected = selection.kind === 'selected'
+    ? selection.rejected.find((entry) => entry.path === original.source.path)
+    : undefined;
+  const manifest = selection.kind === 'selected'
+    ? selection.files.find((file) => file.path === original.source.path)
+    : undefined;
+
+  if (manifest === undefined) {
+    // Refused by policy now (symlink, encoding, size, secret) means it can no
+    // longer be confirmed; genuinely absent means it is gone.
+    const provenance: ProvenanceState = rejected === undefined ? 'missing' : 'stale';
+    return { kind: 'reverified', evidence: { ...original, provenance } };
+  }
+
+  if (manifest.kind !== 'manifest') {
+    return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
+  }
+
+  const located = locateDeclaredDependency(manifest.text, original.assertion.dependency);
+  if (!located.ok) {
+    return { kind: 'reverified', evidence: { ...original, provenance: 'stale' } };
+  }
+
+  const unchanged = located.section === original.assertion.section
+    && located.source.path === original.source.path
+    && located.source.lineStart === original.source.lineStart
+    && located.source.lineEnd === original.source.lineEnd
+    && located.excerpt === original.excerpt;
+
+  return {
+    kind: 'reverified',
+    evidence: { ...original, provenance: unchanged ? 'verified' : 'stale' },
+  };
 }
 
 // ---------------------------------------------------------------------------

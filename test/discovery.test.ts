@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 
 import {
   CANDIDATE_POLICY,
+  DEPENDENCY_SECTIONS,
+  isSafeDependencyName,
   DEFAULT_BUDGET,
   absenceInBoundedScan,
   containsSecretLikeContent,
@@ -381,14 +383,18 @@ describe('encodings and malformed content', () => {
     assert.equal(rejectionFor(result, 'README.md')?.reason, 'missing');
   });
 
-  it('reports an unreadable file with the reader reason', () => {
+  it('reports an unreadable file with a classified, non-echoing detail', () => {
     const reader: RepositoryReader = {
       list: () => [{ path: 'README.md', kind: 'file', size: 10 }],
-      read: () => ({ kind: 'unreadable', reason: 'EACCES' }),
+      read: () => ({ kind: 'unreadable', reason: 'EACCES: open /home/ahmed/.ssh/id_rsa failed' }),
     };
     const result = selectCandidates({ reader, consent: CONSENT });
+    const detail = rejectionFor(result, 'README.md')?.detail ?? '';
     assert.equal(rejectionFor(result, 'README.md')?.reason, 'unreadable');
-    assert.match(rejectionFor(result, 'README.md')?.detail ?? '', /EACCES/);
+    // Useful for troubleshooting...
+    assert.match(detail, /permission denied/);
+    // ...without repeating the reader's text, which can carry private paths.
+    assert.doesNotMatch(detail, /EACCES|id_rsa|\/home\//);
   });
 });
 
@@ -546,6 +552,384 @@ describe('absence is not evidence', () => {
     assert.equal(result.kind, 'not-substantiated');
     // Nothing in the result is shaped like a verified claim of absence.
     assert.equal('evidence' in result, false);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Review corrections
+// ---------------------------------------------------------------------------
+
+/** A reader that records every interaction, so "zero reads" is provable. */
+function countingReader(
+  contents: Record<string, string | Uint8Array>,
+  options: { overrides?: Record<string, ReaderEntry> } = {},
+): { reader: RepositoryReader; reads: string[]; lists: number } {
+  const state = { reads: [] as string[], lists: 0 };
+  const base = makeReader(contents, options);
+  return {
+    reads: state.reads,
+    get lists() {
+      return state.lists;
+    },
+    reader: {
+      list: (dir) => {
+        state.lists += 1;
+        return base.list(dir);
+      },
+      read: (path) => {
+        state.reads.push(path);
+        return base.read(path);
+      },
+    },
+  };
+}
+
+/** A manifest where `left` appears in metadata and scripts before its declaration. */
+const TRICKY_PACKAGE_JSON = JSON.stringify({
+  name: 'fixture',
+  keywords: ['left', 'tooling'],
+  scripts: { test: 'node left.js' },
+  dependencies: { right: '^2.0.0' },
+  devDependencies: { left: '^1.0.0' },
+}, null, 2);
+
+describe('RC-A: dependency claims come from the right section', () => {
+  it('cites the declaration, not an earlier look-alike in metadata or scripts', () => {
+    const result = declaredDependencyEvidence({
+      reader: makeReader({ 'package.json': TRICKY_PACKAGE_JSON }),
+      consent: CONSENT,
+      dependency: 'left',
+    });
+    assert.equal(result.kind, 'evidence');
+    if (result.kind !== 'evidence') return;
+
+    const { evidence } = result;
+    assert.equal(evidence.assertion.section, 'devDependencies');
+    // The excerpt is the declaration line: a quoted key followed by its value.
+    assert.match(evidence.excerpt, /^"left":\s*"\^1\.0\.0"/);
+    // The cited line is the declaration, not the `keywords` line that also
+    // contains a bare `"left"`.
+    const cited = TRICKY_PACKAGE_JSON.split('\n')[evidence.source.lineStart - 1];
+    assert.match(cited, /"left":/);
+    assert.doesNotMatch(cited, /keywords/);
+    // And the claim stays narrow.
+    assert.equal(evidence.claim, 'package.json lists "left" under "devDependencies"');
+  });
+
+  it('does not report a dependency when the name only appears elsewhere', () => {
+    const metadataOnly = JSON.stringify({
+      name: 'fixture',
+      keywords: ['left'],
+      scripts: { test: 'left' },
+      description: 'about "left"',
+      dependencies: { right: '1.0.0' },
+    }, null, 2);
+
+    const result = declaredDependencyEvidence({
+      reader: makeReader({ 'package.json': metadataOnly }),
+      consent: CONSENT,
+      dependency: 'left',
+    });
+    assert.equal(result.kind, 'not-substantiated');
+  });
+
+  it('accepts every supported section and reports which one', () => {
+    for (const section of DEPENDENCY_SECTIONS) {
+      const manifest = JSON.stringify({ [section]: { left: '1.0.0' } }, null, 2);
+      const result = declaredDependencyEvidence({
+        reader: makeReader({ 'package.json': manifest }),
+        consent: CONSENT,
+        dependency: 'left',
+      });
+      assert.equal(result.kind, 'evidence', section);
+      if (result.kind !== 'evidence') continue;
+      assert.equal(result.evidence.assertion.section, section);
+    }
+  });
+
+  const rejections: Array<[string, string]> = [
+    ['invalid JSON', '{ "dependencies": { "left": '],
+    ['a non-object manifest', '[1, 2, 3]'],
+    ['a non-string version', JSON.stringify({ dependencies: { left: { version: '1.0.0' } } })],
+    ['an empty version', JSON.stringify({ dependencies: { left: '' } })],
+    ['an array section', JSON.stringify({ dependencies: ['left'] })],
+    ['a string section', JSON.stringify({ dependencies: 'left' })],
+    ['a duplicate section', '{\n  "dependencies": { "left": "1.0.0" },\n  "dependencies": { "left": "1.0.0" }\n}'],
+    ['a duplicate entry', '{\n  "dependencies": {\n    "left": "1.0.0",\n    "left": "2.0.0"\n  }\n}'],
+  ];
+
+  for (const [label, manifest] of rejections) {
+    it(`refuses ${label} instead of inventing a citation`, () => {
+      const result = declaredDependencyEvidence({
+        reader: makeReader({ 'package.json': manifest }),
+        consent: CONSENT,
+        dependency: 'left',
+      });
+      assert.equal(result.kind, 'not-substantiated', label);
+    });
+  }
+
+  it('validates the dependency name before searching', () => {
+    const unsafe = ['', ' ', 'a"b', '../../etc/passwd', 'left\n', 'x'.repeat(300), '-left', 'left\u0000'];
+    for (const dependency of unsafe) {
+      assert.equal(isSafeDependencyName(dependency), false, JSON.stringify(dependency));
+      const result = declaredDependencyEvidence({
+        reader: makeReader({ 'package.json': JSON.stringify({ dependencies: { left: '1.0.0' } }) }),
+        consent: CONSENT,
+        dependency,
+      });
+      assert.equal(result.kind, 'not-substantiated', JSON.stringify(dependency));
+    }
+    // A scoped name is a legitimate shape.
+    assert.equal(isSafeDependencyName('@scope/name'), true);
+  });
+});
+
+describe('RC-B: re-verification cannot bypass discovery policy', () => {
+  function capture(): Evidence {
+    const result = declaredDependencyEvidence({
+      reader: makeReader({ 'package.json': PACKAGE_JSON }),
+      consent: CONSENT,
+      dependency: 'left',
+    });
+    if (result.kind !== 'evidence') throw new Error('fixture should produce evidence');
+    return result.evidence;
+  }
+
+  /** Forges a citation at `path` while keeping everything else valid. */
+  function forgedAt(path: string): Evidence {
+    const base = capture();
+    return { ...base, source: { ...base.source, path } };
+  }
+
+  const unsafeSources = ['.env', '.env.local', '/etc/passwd', '../../etc/passwd', 'src/app.ts', 'node_modules/x'];
+  for (const path of unsafeSources) {
+    it(`refuses a forged citation at ${path} with zero reads`, () => {
+      const counter = countingReader({ 'package.json': PACKAGE_JSON });
+      const result = reverifyEvidence({ reader: counter.reader, consent: CONSENT, evidence: forgedAt(path) });
+
+      assert.equal(result.kind, 'not-verifiable');
+      assert.equal(counter.reads.length, 0, 'a forbidden path must not be read');
+      assert.equal(counter.lists, 0, 'a forbidden path must not even cause a listing');
+    });
+  }
+
+  it('never reads anything without consent', () => {
+    const counter = countingReader({ 'package.json': PACKAGE_JSON });
+    const result = reverifyEvidence({ reader: counter.reader, consent: undefined, evidence: capture() });
+
+    assert.equal(result.kind, 'reverified');
+    if (result.kind !== 'reverified') return;
+    assert.equal(result.evidence.provenance, 'stale');
+    assert.equal(counter.reads.length, 0);
+    assert.equal(counter.lists, 0);
+  });
+
+  it('does not verify a citation that points at documentation', () => {
+    const counter = countingReader({ 'README.md': '# hi', 'package.json': PACKAGE_JSON });
+    const result = reverifyEvidence({ reader: counter.reader, consent: CONSENT, evidence: forgedAt('README.md') });
+    assert.equal(result.kind, 'reverified');
+    if (result.kind !== 'reverified') return;
+    assert.equal(result.evidence.provenance, 'stale');
+  });
+
+  it('re-applies entry and content checks rather than trusting the record', () => {
+    const base = capture();
+
+    // Now a symlink.
+    const symlink = countingReader({}, {
+      overrides: { 'package.json': { path: 'package.json', kind: 'symlink', target: '/etc/shadow' } },
+    });
+    const viaSymlink = reverifyEvidence({ reader: symlink.reader, consent: CONSENT, evidence: base });
+    assert.equal(viaSymlink.kind, 'reverified');
+    if (viaSymlink.kind === 'reverified') assert.equal(viaSymlink.evidence.provenance, 'stale');
+
+    // Now oversized.
+    const oversized = countingReader({ 'package.json': 'x'.repeat(DEFAULT_BUDGET.maxFileBytes + 1) });
+    const tooBig = reverifyEvidence({ reader: oversized.reader, consent: CONSENT, evidence: base });
+    assert.equal(tooBig.kind, 'reverified');
+    if (tooBig.kind === 'reverified') assert.equal(tooBig.evidence.provenance, 'stale');
+
+    // Now credential-bearing.
+    const secret = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+    const secretive = countingReader({ 'package.json': JSON.stringify({ dependencies: { left: '1.0.0', note: secret } }) });
+    const leaked = reverifyEvidence({ reader: secretive.reader, consent: CONSENT, evidence: base });
+    assert.equal(leaked.kind, 'reverified');
+    if (leaked.kind === 'reverified') assert.equal(leaked.evidence.provenance, 'stale');
+  });
+
+  it('reports missing when the source is gone, stale when the declaration moved', () => {
+    const base = capture();
+
+    const gone = reverifyEvidence({ reader: makeReader({}), consent: CONSENT, evidence: base });
+    assert.equal(gone.kind, 'reverified');
+    if (gone.kind === 'reverified') assert.equal(gone.evidence.provenance, 'missing');
+
+    // Same declaration, different position.
+    const shifted = JSON.stringify({ name: 'x', dependencies: { left: '^1.0.0' } }, null, 2);
+    const moved = reverifyEvidence({ reader: makeReader({ 'package.json': shifted }), consent: CONSENT, evidence: base });
+    assert.equal(moved.kind, 'reverified');
+    if (moved.kind === 'reverified') assert.equal(moved.evidence.provenance, 'stale');
+
+    // Declaration removed entirely.
+    const removed = reverifyEvidence({
+      reader: makeReader({ 'package.json': JSON.stringify({ dependencies: { right: '^2.0.0' } }) }),
+      consent: CONSENT,
+      evidence: base,
+    });
+    assert.equal(removed.kind, 'reverified');
+    if (removed.kind === 'reverified') assert.equal(removed.evidence.provenance, 'stale');
+  });
+
+  it('re-derives the fact rather than trusting claim text or an excerpt prefix', () => {
+    const base = capture();
+
+    // A tampered excerpt must not inherit a verified state.
+    const tampered = reverifyEvidence({
+      reader: makeReader({ 'package.json': PACKAGE_JSON }),
+      consent: CONSENT,
+      evidence: { ...base, excerpt: 'something else entirely' },
+    });
+    assert.equal(tampered.kind, 'reverified');
+    if (tampered.kind === 'reverified') assert.equal(tampered.evidence.provenance, 'stale');
+
+    // Arbitrary claim prose riding on a genuine citation is not evidence at all.
+    const prose = reverifyEvidence({
+      reader: makeReader({ 'package.json': PACKAGE_JSON }),
+      consent: CONSENT,
+      evidence: { ...base, claim: 'the feature is fully implemented and tested' },
+    });
+    assert.equal(prose.kind, 'not-verifiable');
+
+    // A fabricated dependency claim cannot be corroborated by the file.
+    const fabricated = reverifyEvidence({
+      reader: makeReader({ 'package.json': PACKAGE_JSON }),
+      consent: CONSENT,
+      evidence: {
+        ...base,
+        assertion: { kind: 'declared-dependency', dependency: 'ghost', section: 'dependencies' },
+        claim: 'package.json lists "ghost" under "dependencies"',
+      },
+    });
+    assert.equal(fabricated.kind, 'reverified');
+    if (fabricated.kind === 'reverified') assert.equal(fabricated.evidence.provenance, 'stale');
+  });
+
+  it('refuses an unsupported assertion kind', () => {
+    const base = capture();
+    const result = reverifyEvidence({
+      reader: makeReader({ 'package.json': PACKAGE_JSON }),
+      consent: CONSENT,
+      evidence: { ...base, assertion: { kind: 'repo-has-no-bugs', dependency: 'left', section: 'dependencies' } },
+    });
+    assert.equal(result.kind, 'not-verifiable');
+  });
+});
+
+describe('RC-C: budget ceilings cannot be raised', () => {
+  const adversarial: Array<[string, unknown]> = [
+    ['larger than the ceiling', { maxFiles: DEFAULT_BUDGET.maxFiles + 1 }],
+    ['a raised byte ceiling', { maxFileBytes: DEFAULT_BUDGET.maxFileBytes * 2 }],
+    ['a raised total', { maxTotalBytes: 1024 * 1024 }],
+    ['zero', { maxFiles: 0 }],
+    ['negative', { maxFileLines: -1 }],
+    ['fractional', { maxFileLines: 2.5 }],
+    ['NaN', { maxFiles: Number.NaN }],
+    ['Infinity', { maxDirectoryEntries: Number.POSITIVE_INFINITY }],
+    ['a string', { maxFiles: '6' }],
+    ['null field', { maxFiles: null }],
+    ['not an object', 'six'],
+  ];
+
+  for (const [label, budget] of adversarial) {
+    it(`refuses ${label} before touching the reader`, () => {
+      const counter = countingReader({ 'package.json': PACKAGE_JSON, 'README.md': '# hi' });
+      const result = selectCandidates({ reader: counter.reader, consent: CONSENT, budget: budget as never });
+
+      assert.equal(result.kind, 'refused');
+      if (result.kind !== 'refused') return;
+      assert.equal(result.refusal.reason, 'invalid-budget');
+      // The diagnostic names the field without echoing the supplied value.
+      assert.match(result.refusal.detail, /max[A-Z]|budget/);
+      assert.doesNotMatch(result.refusal.detail, /NaN|Infinity|1024/);
+      assert.equal(counter.reads.length, 0);
+      assert.equal(counter.lists, 0);
+    });
+  }
+
+  it('still permits smaller limits and the exact ceiling', () => {
+    const contents = { 'README.md': '# hi', 'package.json': PACKAGE_JSON, 'go.mod': 'module x' };
+
+    const smaller = selectCandidates({
+      reader: makeReader(contents),
+      consent: CONSENT,
+      budget: { maxFiles: 1 },
+    });
+    assert.equal(smaller.kind, 'selected');
+    if (smaller.kind === 'selected') assert.equal(smaller.files.length, 1);
+
+    const exact = selectCandidates({
+      reader: makeReader(contents),
+      consent: CONSENT,
+      budget: {
+        maxFiles: DEFAULT_BUDGET.maxFiles,
+        maxFileBytes: DEFAULT_BUDGET.maxFileBytes,
+        maxTotalBytes: DEFAULT_BUDGET.maxTotalBytes,
+        maxFileLines: DEFAULT_BUDGET.maxFileLines,
+        maxDirectoryEntries: DEFAULT_BUDGET.maxDirectoryEntries,
+      },
+    });
+    assert.equal(exact.kind, 'selected');
+  });
+});
+
+describe('RC-D: diagnostics do not disclose private data', () => {
+  it('does not echo a symlink target', () => {
+    const fakeToken = ['ghp', '_', 'd'.repeat(32)].join('');
+    const overrides: Record<string, ReaderEntry> = {
+      'README.md': { path: 'README.md', kind: 'symlink', target: `/home/ahmed/.ssh/${fakeToken}` },
+    };
+    const result = selectCandidates({ reader: makeReader({}, { overrides }), consent: CONSENT });
+    const detail = rejectionFor(result, 'README.md')?.detail ?? '';
+
+    assert.equal(rejectionFor(result, 'README.md')?.reason, 'symlink');
+    assert.doesNotMatch(detail, /ghp_|\/home\/ahmed|\.ssh/);
+    assert.match(detail, /symlink is never followed/);
+    // The path itself is allowlisted and safe to name.
+    assert.equal(rejectionFor(result, 'README.md')?.path, 'README.md');
+  });
+
+  it('does not echo reader error text', () => {
+    const fakeToken = ['sk', '-', 'e'.repeat(24)].join('');
+    const reader: RepositoryReader = {
+      list: () => [{ path: 'package.json', kind: 'file', size: 10 }],
+      read: () => ({ kind: 'unreadable', reason: `cannot open /home/ahmed/.aws/credentials ${fakeToken}` }),
+    };
+    const result = selectCandidates({ reader, consent: CONSENT });
+    const detail = rejectionFor(result, 'package.json')?.detail ?? '';
+
+    assert.equal(rejectionFor(result, 'package.json')?.reason, 'unreadable');
+    assert.doesNotMatch(detail, /sk-|\/home\/ahmed|credentials/);
+  });
+
+  it('classifies common read failures into stable, closed phrases', () => {
+    const cases: Array<[string, RegExp]> = [
+      ['EACCES: permission denied', /permission denied/],
+      ['EPERM', /permission denied/],
+      ['EISDIR: illegal operation', /directory/],
+      ['ENOENT: no such file', /disappeared/],
+      ['ELOOP: too many symbolic links', /too many links/],
+      ['something inexplicable', /did not explain why/],
+    ];
+    for (const [reason, expected] of cases) {
+      const reader: RepositoryReader = {
+        list: () => [{ path: 'README.md', kind: 'file', size: 1 }],
+        read: () => ({ kind: 'unreadable', reason }),
+      };
+      const result = selectCandidates({ reader, consent: CONSENT });
+      assert.match(rejectionFor(result, 'README.md')?.detail ?? '', expected, reason);
+    }
   });
 });
 
