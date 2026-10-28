@@ -12,6 +12,19 @@
 
 import { readStoredRecord } from './record.ts';
 import type { ReadResult as V1ReadResult, SessionRecord as LegacySessionRecord } from './record.ts';
+import {
+  isSettledDecision,
+  isUnresolvedAnswer,
+  isUnresolvedAnswerText,
+  UNRESOLVED_ANSWER_LABELS,
+  validateGraph,
+  describeGraphProblem,
+} from './graph.ts';
+
+// Eligibility rules live in the graph layer, which is the single owner of "what
+// may satisfy a prerequisite". They are re-exported here so the schema module
+// keeps its public surface and callers need not import a second module.
+export { isSettledDecision, isUnresolvedAnswer, isUnresolvedAnswerText, UNRESOLVED_ANSWER_LABELS };
 
 export const SESSION_SCHEMA_VERSION = 2 as const;
 
@@ -84,50 +97,6 @@ const DECISION_STATUSES: readonly DecisionStatus[] = [
 ];
 const PRIORITIES: readonly DecisionPriority[] = ['critical', 'important', 'minor'];
 const ANSWER_ACTORS: readonly DecisionAnswerActor[] = ['user', 'assumption'];
-
-/**
- * Labels that explicitly mean "no decision yet". Only the M0 choice is listed,
- * and it is matched exactly after whitespace normalization: an answer is never
- * reclassified just because it mentions uncertainty in its own words.
- */
-export const UNRESOLVED_ANSWER_LABELS: readonly string[] = ['I have not decided'];
-
-function normalizeAnswerText(text: string): string {
-  return text.trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-/** True only for an answer that is, by exact designation, not a decision. */
-export function isUnresolvedAnswerText(text: string): boolean {
-  const normalized = normalizeAnswerText(text);
-  return UNRESOLVED_ANSWER_LABELS.some((label) => normalizeAnswerText(label) === normalized);
-}
-
-/**
- * One rule for both representations: an explicit unresolved option selection,
- * or free text that exactly reproduces a designated undecided label. A chosen
- * option is judged only by its identity, never by its prose.
- */
-export function isUnresolvedAnswer(
-  answer: DecisionAnswer,
-  options: readonly DecisionOption[],
-): boolean {
-  if (answer.chosenOptionId !== undefined) {
-    return options.find((option) => option.id === answer.chosenOptionId)?.unresolved === true;
-  }
-  return isUnresolvedAnswerText(answer.text);
-}
-
-/**
- * The only decisions that may satisfy a prerequisite or an approval: an answer
- * that was given by the user or explicitly assumed, and that is not a recorded
- * non-decision. `needs_review` is deliberately excluded — it retains an answer
- * but that answer is stale.
- */
-export function isSettledDecision(decision: Decision): boolean {
-  if (decision.status !== 'answered' && decision.status !== 'assumed') return false;
-  if (decision.answer === undefined) return false;
-  return !isUnresolvedAnswer(decision.answer, decision.options);
-}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -261,6 +230,17 @@ export function readStoredSession(value: unknown): SessionReadResult {
     if (ids.has(parsed.id)) return { kind: 'unreadable', reason: `duplicate decision id (${parsed.id})` };
     ids.add(parsed.id);
     readDecisions.push(parsed);
+  }
+
+  // Structural integrity: a session whose dependencies cannot be resolved is
+  // not trustworthy state. Validated here, at the one place a value becomes a
+  // `Session`, and reported without repairing anything.
+  const graph = validateGraph(readDecisions);
+  if (!graph.ok) {
+    return {
+      kind: 'unreadable',
+      reason: `session decision graph is invalid (${describeGraphProblem(graph.problems[0])})`,
+    };
   }
 
   // Approval metadata consistency: approvedAt/approvedSnapshot require an approved
