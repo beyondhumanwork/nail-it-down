@@ -4,9 +4,9 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha**. M0 and all four M1 slices are **merged**; M1 has passed its scoped **technical acceptance** gate as recorded in `docs/M1_ACCEPTANCE.md`. This is not beta sign-off or approval of the full v0.1 product. M2 and all later milestones remain **not authorized**. No public installation or release is available. The M0-09 headless limitation and other M1 caveats remain in the acceptance records.
+- Current phase: **pre-alpha**. M0 and M1 are merged and M1 passed scoped technical acceptance (`docs/M1_ACCEPTANCE.md`). **M2 Slice 1 only** (host-independent, synthetic-fixture bounded discovery policy/evidence core) is authorized under `docs/M2_SLICE1_CONTRACT.md`; no live repository reads, host integration, M2 later slices, models, CI or release are authorized. The complete v0.1 product remains a draft and not publicly installable. M0-09 and M1 limitations remain recorded.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
-- The full PRD and broader architecture remain **proposed**. The accepted implementation contract covers M0 and the narrowly scoped M1 deterministic interview, not M2, model assistance, repository reads, export or release. See `docs/M1_ACCEPTANCE.md`, `docs/M0_ACCEPTANCE.md`, `docs/REVIEW_GATE.md` and `docs/ROADMAP.md`. Do not silently treat proposed features as authorized.
+- The full PRD and broader architecture remain **proposed**. The accepted implementation contract covers M0 and M1; only the bounded **M2 Slice 1** contract has additional authorization. See `docs/M2_SLICE1_CONTRACT.md`, `docs/M1_ACCEPTANCE.md`, `docs/M0_ACCEPTANCE.md`, and `docs/ROADMAP.md`. Do not treat proposed repository/model access, exports or later milestones as authorized.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
 
 ## Scope and architecture
