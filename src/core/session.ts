@@ -17,6 +17,7 @@ import {
   isUnresolvedAnswer,
   isUnresolvedAnswerText,
   UNRESOLVED_ANSWER_LABELS,
+  unsettledPrerequisites,
   validateGraph,
   describeGraphProblem,
 } from './graph.ts';
@@ -194,6 +195,39 @@ function readDecision(value: unknown): Decision | string {
   return decision;
 }
 
+export type SettledPrerequisiteConflict = {
+  decisionId: string;
+  pending: string[];
+};
+
+/**
+ * Settled decisions whose own prerequisites are not settled.
+ *
+ * This is the one definition of a contradiction that both the approved-session
+ * validator and the approval-readiness calculation use, so the two cannot
+ * disagree about whether a session is approvable. It is not a second graph
+ * engine: it is `isSettledDecision` and `unsettledPrerequisites` applied to each
+ * decision.
+ *
+ * The case it catches is real: a decision can be marked `answered` while the
+ * decision it depends on is deferred or invalidated. The answer then rests on
+ * ground the person never settled. Callers may only report approval over a
+ * decision list where this is empty.
+ *
+ * Reported in source array order, so the output is deterministic.
+ */
+export function settledWithUnmetPrerequisites(
+  decisions: readonly Decision[],
+): SettledPrerequisiteConflict[] {
+  const conflicts: SettledPrerequisiteConflict[] = [];
+  for (const decision of decisions) {
+    if (!isSettledDecision(decision)) continue;
+    const pending = unsettledPrerequisites(decisions, decision);
+    if (pending.length > 0) conflicts.push({ decisionId: decision.id, pending });
+  }
+  return conflicts;
+}
+
 /**
  * Validates a persisted v2 value. Never mutates the input.
  * Unknown extra fields are dropped, so a future schema cannot leak fields
@@ -273,6 +307,17 @@ export function readStoredSession(value: unknown): SessionReadResult {
       if (decision.priority === 'critical' && !isSettledDecision(decision)) {
         return { kind: 'unreadable', reason: `approved session has an unresolved critical decision (${decision.id})` };
       }
+    }
+    // A settled decision may not rest on an unsettled prerequisite: its answer
+    // would be an approval over ground the person never settled. Checked before
+    // the snapshot, so a fabricated matching snapshot cannot bypass it.
+    const conflicts = settledWithUnmetPrerequisites(readDecisions);
+    if (conflicts.length > 0) {
+      const first = conflicts[0];
+      return {
+        kind: 'unreadable',
+        reason: `approved session has a settled decision whose prerequisites are unresolved (${first.decisionId} waits on ${first.pending.join(', ')})`,
+      };
     }
     // The snapshot must be the canonical text of exactly these decisions.
     // Anything else is stale, hand-edited or fabricated.

@@ -4,15 +4,15 @@ These instructions apply to Pi, Codex, Command Code, and other coding agents con
 
 ## Source of truth and current state
 
-- Current phase: **pre-alpha, M0 host-feasibility spike implemented and verified against Command Code 1.84.0** (2026-10-21). Results, host API mismatches and limitations are in `docs/M0_EVIDENCE.md`. M1 and later are **not** authorized.
+- Current phase: **pre-alpha**. M0 (host-feasibility spike) is **accepted and merged**. M1 Slice 1 (schema v2 domain contract) and Slice 2 (decision graph) are **merged**. M1 Slice 3 (deterministic transitions, invalidation and approval readiness) is **in implementation, not yet accepted**. Slice 4 and every later milestone remain **pending**. The complete v0.1 product is still pre-alpha and **not publicly installable**. Host evidence is in `docs/M0_EVIDENCE.md`; the M0-09 headless exception remains documented in `docs/REVIEW_GATE.md` and `docs/M0_ACCEPTANCE.md`.
 - Read `docs/PRODUCT_SPEC_DRAFT.md`, `docs/ARCHITECTURE_DECISIONS.md`, `docs/M0_HANDOFF.md`, and this file before coding.
-- The full PRD and architecture remain **proposed**, but the narrow M0 technical spike is authorized. See `docs/REVIEW_GATE.md`, `docs/M0_HANDOFF.md`, and `docs/M0_ACCEPTANCE.md`. Do not silently treat proposals as an approved M1+ implementation contract.
+- The full PRD and architecture remain **proposed**. The accepted implementation contract is the M0 spike plus the merged M1 Slice 1–2 modules; Slice 3 is under review. See `docs/REVIEW_GATE.md`, `docs/M0_ACCEPTANCE.md` and `docs/ROADMAP.md`. Do not silently treat proposals as an approved contract for Slice 4, M2 or later.
 - Command Code's public ModApi is experimental. Verify signatures against the installed host and official docs; report mismatches.
 
 ## Scope and architecture
 
-- First code milestone is **M0 only**: local mod load, `/naildown`, one hard-coded question, durable host-backed answer, cancel/default-deny approval, status/resume.
-- No LLM calls, repository inspection, full interview DAG, Markdown export, subprocesses, network requests, background services, or automatic file modification in M0.
+- Implemented code today: the M0 mod (local mod load, `/naildown`, one hard-coded question, durable host-backed answer, cancel/default-deny approval, status/resume) and a **pure M1 domain core** (`src/core/session.ts`, `graph.ts`, `transitions.ts`) that is not yet wired into the host adapter.
+- No LLM calls, repository inspection, Markdown export, subprocesses, network requests, background services, or automatic file modification in M0 or M1. The full interview, repository reading and privacy features are **not** implemented.
 - Keep platform integration in a thin adapter. Domain logic should remain deterministic and independently testable.
 - An LLM never creates user approval or trusted repository facts. Persist decisions only after user confirmation.
 
