@@ -107,7 +107,7 @@ const CAVEATS: readonly string[] = [
  * that function decides whether each is real evidence. Parsing here is
  * enumeration of candidates, not a second evidence path.
  */
-function dependencyNamesFrom(manifestText: string): string[] {
+export function dependencyNamesFrom(manifestText: string): string[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(manifestText);
