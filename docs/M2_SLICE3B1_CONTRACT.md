@@ -2,7 +2,7 @@
 
 **Authorization:** APPROVED for **Slice 3B1 only** — 2026-10-28.  
 **Baseline:** `main` at `19193497709304256dac3726bad845b644939a2b` after [M2 Slice 3A acceptance](M2_SLICE3A_ACCEPTANCE.md).  
-**Implementation status:** Not started; this document authorizes a narrow **design/research deliverable and one bounded pure-core performance correction**.  
+**Historical authorization:** This document authorized design/research and narrow scanner hardening only. **Current disposition:** implementation technically accepted on 2026-10-28; see [M2 Slice 3B1 acceptance](M2_SLICE3B1_ACCEPTANCE.md). The [security decision memo](M2_REAL_WORKSPACE_SECURITY_DECISION.md) remains PROPOSED and no owner risk acceptance or live repository pilot is authorized.  
 **No authority to read a real project repository at runtime, including the Nail It Down checkout, or to wire filesystem access into `src/index.ts`.**
 
 ## Why this gate exists
