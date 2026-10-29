@@ -42,6 +42,31 @@ export type DialogOption = {
 
 export type ModUi = {
   select(input: {title: string; options: readonly DialogOption[]}): Promise<string | undefined>;
+  /**
+   * Free-text prompt, added in M2 Slice 3B2 after checking the installed host.
+   *
+   * Verified against Command Code **1.88.0** `dist/cli.mjs`:
+   * `input: async ({title, placeholder}) => { ... }` returns `undefined` when no
+   * interaction surface is bound (`if (!ask) return;`) and when the answer equals
+   * the built-in no-answer sentinel, and the question is rendered as
+   * `"<title> (<placeholder>)"` when a placeholder is supplied. The bundled
+   * `reference/ui.md` says the same in prose: "Headless, each resolves its
+   * deterministic default: confirm -> false, select/input -> undefined - never
+   * auto-approved."
+   *
+   * Optional because the rest of this file mirrors a 1.84.0 transcription that
+   * did not include it; callers must treat an absent `input` as "cannot ask",
+   * which is a refusal, never an approval.
+   */
+  input?(input: {title: string; placeholder?: string}): Promise<string | undefined>;
+  /**
+   * A notice feed row, verified against Command Code 1.88.0 `dist/cli.mjs`:
+   * `notify: (message, level = 'info') => emit(...)`. Synchronous and void, so it
+   * is a display surface rather than a question. Used by the workspace pilot to
+   * show the full disclosure *before* the consent dialog, which is where a person
+   * has to be able to read it.
+   */
+  notify?(message: string, level?: 'info' | 'warning' | 'error'): void;
   capabilities: {
     readonly status: boolean;
     readonly surface: boolean;
