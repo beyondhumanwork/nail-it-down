@@ -24,7 +24,14 @@ import * as fs from 'node:fs';
 import * as nodePath from 'node:path';
 
 import { CANDIDATE_POLICY, DEFAULT_BUDGET, inspectCandidatePath } from '../core/discovery.ts';
-import type { EntryKind, ReadOutcome, ReaderEntry, RepositoryReader } from '../core/discovery.ts';
+import type {
+  EntryKind,
+  ListResult,
+  ListingFailureReason,
+  ReadOutcome,
+  ReaderEntry,
+  RepositoryReader,
+} from '../core/discovery.ts';
 
 /**
  * The guarantees this adapter does and does not provide. Written down because a
@@ -265,7 +272,26 @@ export type ReadFailureReason =
   | 'file-replaced'
   | 'file-changed'
   | 'too-many-open-files'
-  | 'io-error';
+  | 'io-error'
+  /** The invocation's aggregate physical-read allowance is spent. */
+  | 'budget-exhausted';
+
+/**
+ * Maps an errno code from a failed directory open to a bounded reason.
+ *
+ * The message is never read: it can carry an absolute path.
+ */
+function classifyListingError(error: unknown): ListingFailureReason {
+  switch ((error as NodeJS.ErrnoException | undefined)?.code) {
+    case 'ENOENT': return 'missing';
+    case 'ENOTDIR': return 'not-a-directory';
+    case 'EACCES':
+    case 'EPERM': return 'permission-denied';
+    case 'EMFILE':
+    case 'ENFILE': return 'too-many-open-files';
+    default: return 'open-failed';
+  }
+}
 
 function refuse(reason: ReadFailureReason): ReadOutcome {
   return { kind: 'unreadable', reason };
@@ -320,10 +346,31 @@ export type NodeReaderOptions = {
    * own kind of lie.
    */
   maxFileBytes?: number;
+  /**
+   * Aggregate bytes this reader may physically consume across its lifetime.
+   *
+   * This is the only place the bound can be enforced honestly: the adapter is the
+   * only layer that sees how many bytes `readSync` actually returned, including
+   * the bytes it consumed before refusing a file. A caller-side budget can only
+   * count what it was handed, which is a smaller and flattering number.
+   *
+   * May only tighten the approved total. Defaults to `DEFAULT_BUDGET.maxTotalBytes`.
+   */
+  maxPhysicalBytes?: number;
 };
 
 export type NodeReaderResult =
-  | { ok: true; reader: RepositoryReader; canonicalRoot: string }
+  | {
+    ok: true;
+    reader: RepositoryReader;
+    canonicalRoot: string;
+    /**
+     * Bytes this reader has physically consumed so far, from the OS's own read
+     * counts. Exposed so a test can prove the bound rather than infer it from
+     * whatever the caller happened to be handed.
+     */
+    physicalBytes: () => number;
+  }
   | { ok: false; reason: RootRejection; detail: string };
 
 type ListedEntry = {
@@ -356,6 +403,19 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
   const validation = validateRoot({ root: options.root, permittedParents: options.permittedParents });
   if (!validation.ok) return { ok: false, reason: validation.reason, detail: validation.detail };
 
+  const maxPhysicalBytes = options.maxPhysicalBytes ?? DEFAULT_BUDGET.maxTotalBytes;
+  if (!Number.isInteger(maxPhysicalBytes) || maxPhysicalBytes < 1
+    || maxPhysicalBytes > DEFAULT_BUDGET.maxTotalBytes) {
+    return {
+      ok: false,
+      reason: 'platform-unsupported',
+      detail: `maxPhysicalBytes must be a whole number between 1 and ${DEFAULT_BUDGET.maxTotalBytes}`,
+    };
+  }
+
+  /** Every positive `readSync` return, for the whole life of this adapter. */
+  let physicalBytesRead = 0;
+
   const canonicalRoot = validation.canonicalRoot;
   const expectedRootIdentity = validation.identity;
   const rootIdentity = { dev: expectedRootIdentity.dev, ino: expectedRootIdentity.ino };
@@ -387,12 +447,12 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     }
   }
 
-  function listRoot(): readonly ReaderEntry[] {
+  function listRoot(): ListResult {
     // A new listing attempt replaces the prior authorization, including when
     // this attempt fails before it can enumerate a single entry.
     listed.clear();
     if (!rootUnchanged()) {
-      return [];
+      return { kind: 'error', reason: 'root-replaced' };
     }
 
     const entries: ReaderEntry[] = [];
@@ -400,9 +460,11 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     // never materialised. The core turns "more than the cap" into a refusal.
     const cap = DEFAULT_BUDGET.maxDirectoryEntries + 1;
     let directory: fs.Dir | undefined;
+    let opened = false;
 
     try {
       directory = fs.opendirSync(canonicalRoot);
+      opened = true;
       for (;;) {
         if (entries.length >= cap) break;
         const dirent = directory.readSync();
@@ -452,11 +514,11 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
           listed.set(path, { kind: 'other' });
         }
       }
-    } catch {
-      // An unlistable root reads as empty. Nothing about why is disclosed, and
-      // the core then reports "nothing this policy reads" rather than a fact.
+    } catch (error) {
+      // A root that cannot be read is not an empty root. Report which of the two
+      // happened; a failure after the directory opened means the list is partial.
       listed.clear();
-      return [];
+      return { kind: 'error', reason: opened ? 'incomplete-enumeration' : classifyListingError(error) };
     } finally {
       if (directory !== undefined) {
         try {
@@ -469,9 +531,11 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
 
     // The core refuses a 101-entry listing. Do not leave the allowed entries
     // encountered before the overflow authorized for a later direct read.
+    // Over the ceiling is a policy refusal the core makes from a complete-enough
+    // list, not a listing failure: the entries were enumerated successfully.
     if (entries.length > DEFAULT_BUDGET.maxDirectoryEntries) listed.clear();
 
-    return entries;
+    return { kind: 'ok', entries };
   }
 
   function readFile(relativePath: string): ReadOutcome {
@@ -490,6 +554,10 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     // a caller can tell "this was a link we refused" from "this was a device".
     if (expectation.kind === 'symlink') return refuse('symlink-not-permitted');
     if (expectation.kind !== 'file') return refuse('not-a-regular-file');
+
+    // Nothing may be opened once the allowance is spent, so an exhausted budget
+    // cannot be converted into "just one more attempt".
+    if (physicalBytesRead >= maxPhysicalBytes) return refuse('budget-exhausted');
 
     const full = nodePath.join(canonicalRoot, inspection.path);
     let descriptor: number | undefined;
@@ -523,6 +591,14 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
         return refuse('file-changed');
       }
 
+      // Refuse before consuming anything when the file cannot fit in what is
+      // left. `stats.size` is authoritative for the descriptor we just opened, so
+      // this is decidable now - whereas a check after reading would already have
+      // spent the bytes.
+      if (physicalBytesRead + Number(stats.size) > maxPhysicalBytes) {
+        return refuse('budget-exhausted');
+      }
+
       // Read at most cap + 1 bytes, so an oversized file is detected without
       // reading all of it, and a file that grows mid-read cannot run away.
       const buffer = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxFileBytes + 1));
@@ -532,16 +608,29 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
       for (;;) {
         const remaining = maxFileBytes + 1 - total;
         if (remaining <= 0) break;
+        // Never read past the invocation allowance, even if the file grew after
+        // it was measured. Cutting the read short makes the size check below
+        // refuse the file, so the overshoot becomes a refusal rather than an
+        // unaccounted read.
+        const allowance = maxPhysicalBytes - physicalBytesRead - total;
+        if (allowance <= 0) break;
         let read: number;
         try {
-          read = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, remaining), null);
+          read = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, remaining, allowance), null);
         } catch (error) {
+          // Bytes read before the failure were still consumed from the OS.
+          physicalBytesRead += total;
           return classifyOpenError(error);
         }
         if (read === 0) break;
         chunks.push(Buffer.from(buffer.subarray(0, read)));
         total += read;
       }
+
+      // Accounted here, before any of the checks below: a file that is read and
+      // then refused for being changed, replaced or too large has still cost
+      // these bytes.
+      physicalBytesRead += total;
 
       if (total > maxFileBytes) return refuse('file-too-large');
 
@@ -576,12 +665,12 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
   }
 
   const reader: RepositoryReader = {
-    list(relativeDir: string): readonly ReaderEntry[] {
-      // Root-only enumeration. A nested request yields nothing, so there is no
-      // code path here that walks a tree.
+    list(relativeDir: string): ListResult {
+      // Root-only enumeration. A nested request is refused rather than answered
+      // with an empty list, so no caller can read "nothing" into it.
       if (relativeDir !== '') {
         listed.clear();
-        return [];
+        return { kind: 'error', reason: 'unsupported-scope' };
       }
       return listRoot();
     },
@@ -590,7 +679,7 @@ export function createNodeRepositoryReader(options: NodeReaderOptions): NodeRead
     },
   };
 
-  return { ok: true, reader, canonicalRoot };
+  return { ok: true, reader, canonicalRoot, physicalBytes: () => physicalBytesRead };
 }
 
 /** The allowlisted names this adapter will ever read. Exported for tests and diagnostics. */

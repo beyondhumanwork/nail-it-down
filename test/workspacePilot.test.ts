@@ -395,6 +395,44 @@ describe('pilot: the root must be proposed and then authorized', () => {
 // Consent
 // ---------------------------------------------------------------------------
 
+describe('pilot: reusable, and a second fixture is not a second authority', () => {
+  it('refuses a different owned fixture merely because it exists', async () => {
+    // Both directories are harness-owned and identical in shape. Authorizing one
+    // must not authorize the other: provenance is per-invocation, not "looks like
+    // a fixture".
+    const authorized = project();
+    const other = project();
+
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: ui({ typed: other.root, answer: CONSENT_LABELS.grant }),
+      authorization: authorizationFor(authorized.root),
+    }));
+
+    assert.equal(result.kind, 'refused');
+    if (result.kind === 'refused') assert.equal(result.reason, 'not-authorized-root');
+    assert.deepEqual(under(io, other.root), [], 'the unauthorized fixture must not be touched');
+    assert.deepEqual(under(io, authorized.root), [], 'and the authorized one was not read either');
+  });
+
+  it('contains no compiled-in workspace path', () => {
+    // The module must stay reusable: a real path baked into source would turn
+    // every future invocation into an authorization for that path.
+    const source = fs.readFileSync(
+      nodePath.join(import.meta.dirname, '..', 'src', 'host', 'workspacePilot.ts'),
+      'utf8',
+    );
+    const stripped = source
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('//'))
+      .join('\n');
+
+    for (const forbidden of ['/home/', '/Users/', 'canary-01', 'audit-outputs', 'nail-it-down/canary']) {
+      assert.equal(stripped.includes(forbidden), false, `workspacePilot must not embed ${forbidden}`);
+    }
+  });
+});
+
 describe('pilot: refusal-first consent', () => {
   it('refuses every non-grant answer with zero filesystem operations', async () => {
     const { root } = project();

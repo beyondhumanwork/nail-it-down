@@ -39,6 +39,12 @@ after(() => {
   }
 });
 
+/** Unwraps a successful listing; a failure here is a test failure, not a silent []. */
+function entriesOf(result: ReturnType<RepositoryReader['list']>) {
+  if (result.kind !== 'ok') throw new Error(`expected a listing, got ${result.reason}`);
+  return result.entries;
+}
+
 const CONSENT: ConsentDecision = { granted: true, obtainedBy: 'test fixture' };
 
 function workspace(files: Record<string, string | Uint8Array> = {}): string {
@@ -76,7 +82,7 @@ describe('OS reader: root provenance', () => {
     const root = workspace({ 'README.md': '# hello\n' });
     const reader = readerFor(root);
 
-    const entries = reader.list('');
+    const entries = entriesOf(reader.list(''));
     assert.deepEqual(entries.map((entry) => [entry.path, entry.kind]), [['README.md', 'file']]);
     assert.equal(text(reader.read('README.md')), '# hello\n');
   });
@@ -261,7 +267,7 @@ describe('OS reader: path policy before OS access', () => {
       }) as typeof fsDefault.readSync;
       syncBuiltinESMExports();
 
-      const entries = reader.list('');
+      const entries = entriesOf(reader.list(''));
       assert.ok(entries.length > 0);
       assert.deepEqual(touched, []);
       const selection = selectCandidates({ reader, consent: CONSENT });
@@ -285,8 +291,12 @@ describe('OS reader: path policy before OS access', () => {
     fs.writeFileSync(nodePath.join(root, 'src', 'app.ts'), 'secret');
     const reader = readerFor(root);
 
-    assert.deepEqual(reader.list('src'), [], 'a nested listing must yield nothing');
-    const entries = reader.list('');
+    // A nested request is refused, not answered with an empty list: "nothing"
+    // must never be the reply to a question the reader cannot answer.
+    const nested = reader.list('src');
+    assert.equal(nested.kind, 'error');
+    if (nested.kind === 'error') assert.equal(nested.reason, 'unsupported-scope');
+    const entries = entriesOf(reader.list(''));
     assert.equal(entries.some((entry) => entry.path === 'app.ts'), false);
   });
 });
@@ -299,7 +309,7 @@ describe('OS reader: symlinks', () => {
     fs.symlinkSync(nodePath.join(root, 'README.md'), nodePath.join(root, 'package.json'));
 
     const reader = readerFor(root);
-    const entries = reader.list('');
+    const entries = entriesOf(reader.list(''));
     const agents = entries.find((entry) => entry.path === 'AGENTS.md');
     assert.equal(agents?.kind, 'symlink');
     // No target text is surfaced.
@@ -317,7 +327,7 @@ describe('OS reader: symlinks', () => {
     fs.symlinkSync(nodePath.join(root, 'AGENTS.md'), nodePath.join(root, 'package.json'));
 
     const reader = readerFor(root);
-    const kinds = reader.list('').map((entry) => entry.kind);
+    const kinds = entriesOf(reader.list('')).map((entry) => entry.kind);
     assert.deepEqual(kinds.every((kind) => kind === 'symlink'), true);
     for (const name of ['README.md', 'AGENTS.md', 'package.json']) {
       const result = reader.read(name);
@@ -350,7 +360,7 @@ describe('OS reader: non-regular files', () => {
     fs.mkdirSync(nodePath.join(root, 'README.md'));
     const reader = readerFor(root);
 
-    const entry = reader.list('').find((candidate) => candidate.path === 'README.md');
+    const entry = entriesOf(reader.list('')).find((candidate) => candidate.path === 'README.md');
     assert.equal(entry?.kind, 'directory');
     const result = reader.read('README.md');
     assert.equal(result.kind, 'unreadable');
@@ -497,14 +507,14 @@ describe('OS reader: budgets on actual bytes', () => {
     for (let index = 0; index < 99; index += 1) {
       fs.writeFileSync(nodePath.join(hundred, `extra-${index}.txt`), 'x');
     }
-    const atCap = readerFor(hundred).list('');
+    const atCap = entriesOf(readerFor(hundred).list(''));
     assert.equal(atCap.length, 100);
 
     const overCap = workspace({ 'README.md': '# hi' });
     for (let index = 0; index < 100; index += 1) {
       fs.writeFileSync(nodePath.join(overCap, `extra-${index}.txt`), 'x');
     }
-    const over = readerFor(overCap).list('');
+    const over = entriesOf(readerFor(overCap).list(''));
     // Stops at cap + 1 rather than materialising the whole directory.
     assert.equal(over.length, DEFAULT_BUDGET.maxDirectoryEntries + 1);
 
@@ -522,7 +532,7 @@ describe('OS reader: budgets on actual bytes', () => {
       fs.writeFileSync(nodePath.join(root, `overflow-${index}.txt`), 'x');
     }
 
-    assert.equal(reader.list('').length, DEFAULT_BUDGET.maxDirectoryEntries + 1);
+    assert.equal(entriesOf(reader.list('')).length, DEFAULT_BUDGET.maxDirectoryEntries + 1);
     const result = reader.read('README.md');
     assert.equal(result.kind, 'unreadable');
     if (result.kind === 'unreadable') assert.equal(result.reason, 'not-listed');
@@ -536,12 +546,14 @@ describe('OS reader: budgets on actual bytes', () => {
     const root = workspace({ 'README.md': '# hi' });
     const reader = readerFor(root);
     // A good listing first, so there is authorization to invalidate.
-    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+    assert.equal(entriesOf(reader.list('')).some((entry) => entry.path === 'README.md'), true);
 
     // 0o000 on the directory makes opendir fail for a non-root process.
     fs.chmodSync(root, 0o000);
     try {
-      assert.deepEqual(reader.list(''), [], 'a failed enumeration yields nothing');
+      const failed = reader.list('');
+      assert.equal(failed.kind, 'error', 'a failed enumeration is not an empty directory');
+      if (failed.kind === 'error') assert.equal(failed.reason, 'permission-denied');
       const blocked = reader.read('README.md');
       assert.equal(blocked.kind, 'unreadable');
       if (blocked.kind === 'unreadable') assert.equal(blocked.reason, 'not-listed');
@@ -550,20 +562,205 @@ describe('OS reader: budgets on actual bytes', () => {
     }
 
     // With access restored, only a fresh listing re-authorizes the read.
-    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+    assert.equal(entriesOf(reader.list('')).some((entry) => entry.path === 'README.md'), true);
     assert.equal(reader.read('README.md').kind, 'ok');
   });
 
   it('invalidates removed-file authorization after a successful relist', () => {
     const root = workspace({ 'README.md': '# hi' });
     const reader = readerFor(root);
-    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), true);
+    assert.equal(entriesOf(reader.list('')).some((entry) => entry.path === 'README.md'), true);
     fs.rmSync(nodePath.join(root, 'README.md'));
 
-    assert.equal(reader.list('').some((entry) => entry.path === 'README.md'), false);
+    assert.equal(entriesOf(reader.list('')).some((entry) => entry.path === 'README.md'), false);
     const result = reader.read('README.md');
     assert.equal(result.kind, 'unreadable');
     if (result.kind === 'unreadable') assert.equal(result.reason, 'not-listed');
+  });
+});
+
+describe('OS reader: aggregate physical-read accounting', () => {
+  const prose = 'The quick brown fox jumps over the lazy dog. ';
+
+  it('bounds total physical reads and refuses before exceeding them', () => {
+    // Six allowlisted files at 20,000 bytes each: 120,000 bytes of candidates
+    // against a 96 KiB (98,304) allowance. The fifth file cannot fit.
+    const files: Record<string, string> = {};
+    for (const name of ['README.md', 'AGENTS.md', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'tsconfig.json']) {
+      files[name] = prose.repeat(445).slice(0, 20_000);
+    }
+    const root = workspace(files);
+    const opened = createNodeRepositoryReader({ root, permittedParents: [nodePath.dirname(root)] });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+
+    const reader = opened.reader;
+    reader.list('');
+    const outcomes: string[] = [];
+    for (const name of Object.keys(files)) {
+      const outcome = reader.read(name);
+      outcomes.push(outcome.kind === 'ok' ? 'ok' : outcome.kind === 'unreadable' ? outcome.reason : outcome.kind);
+    }
+
+    const physical = opened.physicalBytes();
+    assert.ok(physical <= DEFAULT_BUDGET.maxTotalBytes, `consumed ${physical}, over the ceiling`);
+    assert.equal(physical, 80_000, 'four whole files, and nothing for the rest');
+    assert.deepEqual(outcomes.slice(0, 4), ['ok', 'ok', 'ok', 'ok']);
+    assert.deepEqual(outcomes.slice(4), ['budget-exhausted', 'budget-exhausted']);
+  });
+
+  it('counts the bytes of a file that is read and then refused', () => {
+    // A change detected *after* the read: the file is fully consumed, then the
+    // post-read version check refuses it. Nothing is kept, but the bytes were
+    // spent, so they must still be charged to the budget.
+    const body = 'The quick brown fox jumps over the lazy dog. '.repeat(89).slice(0, 4_000);
+    const root = workspace({ 'README.md': body });
+    const opened = createNodeRepositoryReader({ root, permittedParents: [nodePath.dirname(root)] });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    opened.reader.list('');
+
+    // Fault injection: the second bigint fstat of the read reports a newer
+    // mtime, which is what a concurrent rewrite looks like.
+    const savedFstat = fsDefault.fstatSync;
+    let bigintCalls = 0;
+    (fsDefault as unknown as Record<string, unknown>).fstatSync = (fd: number, options?: unknown) => {
+      const stats = (savedFstat as (...values: unknown[]) => { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint })(fd, options);
+      if (options !== undefined && typeof options === 'object') {
+        bigintCalls += 1;
+        if (bigintCalls === 2) {
+          return { dev: stats.dev, ino: stats.ino, size: stats.size, mtimeNs: stats.mtimeNs + 1_000_000n, ctimeNs: stats.ctimeNs };
+        }
+      }
+      return stats;
+    };
+    syncBuiltinESMExports();
+
+    let outcome;
+    try {
+      outcome = opened.reader.read('README.md');
+    } finally {
+      (fsDefault as unknown as Record<string, unknown>).fstatSync = savedFstat;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(bigintCalls >= 2, true, 'the injection must have fired');
+    assert.equal(outcome?.kind, 'unreadable');
+    if (outcome?.kind === 'unreadable') assert.equal(outcome.reason, 'file-changed');
+    assert.equal(opened.physicalBytes(), 4_000, 'a refused read is still charged in full');
+  });
+
+  it('reads normally and reports exactly the bytes it kept', () => {
+    const root = workspace({ 'README.md': prose.repeat(20) });
+    const opened = createNodeRepositoryReader({ root, permittedParents: [nodePath.dirname(root)] });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    opened.reader.list('');
+    const outcome = opened.reader.read('README.md');
+    assert.equal(outcome.kind, 'ok');
+    if (outcome.kind === 'ok') assert.equal(opened.physicalBytes(), outcome.bytes.length);
+  });
+
+  it('stops reading at the allowance when a file grows mid-read', () => {
+    // The file measures 4,000 bytes at open, then grows during the read. Without
+    // a per-chunk allowance the loop would consume the growth before noticing.
+    const root = workspace({ 'README.md': 'x'.repeat(4_000) });
+    const opened = createNodeRepositoryReader({
+      root,
+      permittedParents: [nodePath.dirname(root)],
+      maxPhysicalBytes: 6_000,
+    });
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    opened.reader.list('');
+
+    const target = nodePath.join(fs.realpathSync(root), 'README.md');
+    const savedRead = fsDefault.readSync;
+    let grown = false;
+    (fsDefault as unknown as Record<string, unknown>).readSync = (...args: unknown[]) => {
+      if (!grown) { grown = true; fs.appendFileSync(target, 'y'.repeat(26_000)); }
+      return (savedRead as (...values: unknown[]) => number)(...args);
+    };
+    syncBuiltinESMExports();
+
+    let outcome;
+    try {
+      outcome = opened.reader.read('README.md');
+    } finally {
+      (fsDefault as unknown as Record<string, unknown>).readSync = savedRead;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(grown, true, 'the growth must have been injected');
+    assert.equal(outcome?.kind, 'unreadable', 'a grown file is refused');
+    assert.ok(opened.physicalBytes() <= 6_000, `consumed ${opened.physicalBytes()} against a 6,000 allowance`);
+  });
+
+  it('rejects a physical budget above the approved ceiling rather than clamping it', () => {
+    const root = workspace({ 'README.md': '# hi' });
+    const opened = createNodeRepositoryReader({
+      root,
+      permittedParents: [nodePath.dirname(root)],
+      maxPhysicalBytes: DEFAULT_BUDGET.maxTotalBytes + 1,
+    });
+    assert.equal(opened.ok, false);
+    if (!opened.ok) assert.equal(opened.reason, 'platform-unsupported');
+  });
+});
+
+describe('OS reader: listing results', () => {
+  it('reports an empty directory as a successful empty listing', () => {
+    const root = workspace({});
+    const listed = readerFor(root).list('');
+    assert.equal(listed.kind, 'ok');
+    if (listed.kind === 'ok') assert.deepEqual(listed.entries, []);
+  });
+
+  it('reports a replaced root as root-replaced rather than empty', () => {
+    const root = workspace({ 'README.md': '# hi' });
+    const reader = readerFor(root);
+    assert.equal(entriesOf(reader.list('')).length, 1);
+
+    // Swap the root for a different directory with the same path.
+    const moved = `${root}-moved`;
+    fs.renameSync(root, moved);
+    fs.mkdirSync(root);
+
+    const after = reader.list('');
+    assert.equal(after.kind, 'error');
+    if (after.kind === 'error') assert.equal(after.reason, 'root-replaced');
+  });
+
+  it('reports a mid-enumeration failure as incomplete rather than a short list', () => {
+    const root = workspace({ 'README.md': '# hi', 'package.json': '{}' });
+    const reader = readerFor(root);
+
+    // Fault injection: the directory opens, yields one entry, then fails.
+    const saved = fsDefault.opendirSync;
+    let served = 0;
+    (fsDefault as unknown as Record<string, unknown>).opendirSync = (...args: unknown[]) => {
+      const dir = (saved as (...values: unknown[]) => fs.Dir)(...args);
+      const realRead = dir.readSync.bind(dir);
+      (dir as unknown as { readSync: () => unknown }).readSync = () => {
+        served += 1;
+        if (served > 1) throw Object.assign(new Error('injected'), { code: 'EIO' });
+        return realRead();
+      };
+      return dir;
+    };
+    syncBuiltinESMExports();
+
+    let listed;
+    try {
+      listed = reader.list('');
+    } finally {
+      (fsDefault as unknown as Record<string, unknown>).opendirSync = saved;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(served > 1, true, 'the injection must actually have fired');
+    assert.equal(listed?.kind, 'error');
+    if (listed?.kind === 'error') assert.equal(listed.reason, 'incomplete-enumeration');
   });
 });
 

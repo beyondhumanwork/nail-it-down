@@ -38,8 +38,8 @@ import type {
   DiscoveryBudget,
   Evidence,
   ProvenanceState,
+  ListResult,
   ReadOutcome,
-  ReaderEntry,
   RejectionReason,
   RepositoryReader,
 } from '../core/discovery.ts';
@@ -167,14 +167,15 @@ export function snapshotReader(
   budget: DiscoveryBudget,
   onCeilingRefusal?: (relativePath: string) => void,
 ): RepositoryReader {
-  const listings = new Map<string, readonly ReaderEntry[]>();
+  const listings = new Map<string, ListResult>();
   const reads = new Map<string, ReadOutcome>();
   let bytesRead = 0;
   let untrusted = false;
 
   const listedSize = (relativePath: string): number | undefined => {
-    for (const entries of listings.values()) {
-      const found = entries.find((entry) => entry.path === relativePath);
+    for (const listing of listings.values()) {
+      if (listing.kind !== 'ok') continue;
+      const found = listing.entries.find((entry) => entry.path === relativePath);
       if (found !== undefined) return found.size;
     }
     return undefined;
