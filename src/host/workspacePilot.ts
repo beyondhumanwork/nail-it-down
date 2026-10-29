@@ -101,7 +101,28 @@ export type PilotRefusalReason =
  * the root and reports where it really is, and a target that is not the exact
  * root the authorization named is refused before any candidate is listed.
  */
-export type PilotRootRejection = RootRejection | 'unexpected-canonical-root';
+export type PilotRootRejection =
+  | RootRejection
+  | 'unexpected-canonical-root'
+  /** The caller's pre-read gate refused, so no candidate was opened. */
+  | 'pre-read-check-failed';
+
+/**
+ * Why a pre-read gate refused. A closed set, because a free-text reason from a
+ * caller could carry a path or an OS message into the UI.
+ */
+export type PreReadRefusal =
+  | 'root-path-mismatch'
+  | 'root-not-directory'
+  | 'root-symlinked'
+  | 'root-owner-mismatch'
+  | 'mount-unverifiable'
+  | 'mount-not-acceptable'
+  | 'root-is-a-mount-point';
+
+export type PreReadDecision =
+  | { ok: true }
+  | { ok: false; reason: PreReadRefusal };
 
 /**
  * A read file plus a digest of exactly the text this invocation obtained.
@@ -235,6 +256,20 @@ function refusal(reason: PilotRefusalReason, shownRoot: string): PilotResult {
 export async function runWorkspacePilot(input: {
   ui: ModUi | undefined;
   authorization: PilotAuthorization;
+  /**
+   * Optional gate that runs after the native grant and after the root has been
+   * validated and resolved, but **before any candidate file is opened**.
+   *
+   * It exists so a caller can require conditions the reader does not itself
+   * check - ownership, mount provenance - without those conditions becoming a
+   * claim about content that was already read. It can only refuse: there is no
+   * return value that widens what may be read, and it is given the already
+   * validated root rather than a root of its choosing.
+   *
+   * Absent, the pilot behaves exactly as before. Throwing, or returning
+   * anything other than `{ok: true}`, refuses.
+   */
+  beforeRead?: (root: PilotRoot) => PreReadDecision;
 }): Promise<PilotResult> {
   const authorizedRoot = authorizedRootOf(input.authorization);
 
@@ -298,6 +333,27 @@ export async function runWorkspacePilot(input: {
   }
 
   const root: PilotRoot = { proposed: proposal.root, canonical: opened.canonicalRoot };
+
+  // Fail-closed pre-read gate. Everything above this point is dialogs and root
+  // metadata; nothing has opened a candidate file, and nothing will if the gate
+  // refuses or misbehaves.
+  if (input.beforeRead !== undefined) {
+    let decision: PreReadDecision;
+    try {
+      decision = input.beforeRead(root);
+    } catch {
+      // A gate that cannot answer has not approved anything.
+      decision = { ok: false, reason: 'mount-unverifiable' };
+    }
+    if (decision?.ok !== true) {
+      return {
+        kind: 'not-inspected',
+        reason: 'pre-read-check-failed',
+        detail: `required preconditions were not met (${decision?.reason ?? 'mount-unverifiable'}), so no file was read`,
+        disclosure,
+      };
+    }
+  }
 
   // 5. Reuse the Slice 3A snapshot: one listing and one read per path, with the
   //    aggregate ceiling enforced before a file is opened.

@@ -634,6 +634,59 @@ describe('pilot: bounded reading and honest evidence', () => {
     assert.equal(io.opens, result.files.length);
   });
 
+  it('runs the pre-read gate before opening any candidate file', async () => {
+    const { root } = project();
+    const seen: string[] = [];
+
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+      authorization: authorizationFor(root),
+      beforeRead: (validated) => {
+        seen.push(validated.canonical);
+        return { ok: false, reason: 'mount-not-acceptable' };
+      },
+    }));
+
+    assert.deepEqual(seen, [nodePath.resolve(root)], 'the gate sees the validated root');
+    assert.equal(result.kind, 'not-inspected');
+    if (result.kind !== 'not-inspected') return;
+    assert.equal(result.reason, 'pre-read-check-failed');
+    assert.match(result.detail, /mount-not-acceptable/);
+    // Root metadata was necessarily examined; no candidate file was opened and
+    // the directory was never listed.
+    assert.equal(io.opens, 0, 'no candidate file may be opened when the gate refuses');
+    assert.equal(io.lists, 0, 'the root must not be listed when the gate refuses');
+    assert.equal(io.bytes, 0);
+    assert.ok(!JSON.stringify(result).includes('left-pad'), 'no evidence may be produced');
+  });
+
+  it('refuses when the pre-read gate throws or answers ambiguously', async () => {
+    const { root } = project();
+    for (const beforeRead of [
+      () => { throw new Error('gate exploded'); },
+      () => ({ ok: 'yes' } as unknown as { ok: true }),
+    ]) {
+      const { result, io } = await traceIo(() => runWorkspacePilot({
+        ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+        authorization: authorizationFor(root),
+        beforeRead: beforeRead as never,
+      }));
+      assert.equal(result.kind, 'not-inspected');
+      if (result.kind === 'not-inspected') assert.equal(result.reason, 'pre-read-check-failed');
+      assert.equal(io.opens, 0);
+    }
+  });
+
+  it('reads normally when the pre-read gate approves', async () => {
+    const { root } = project();
+    const result = await runWorkspacePilot({
+      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+      authorization: authorizationFor(root),
+      beforeRead: () => ({ ok: true }),
+    });
+    assert.equal(result.kind, 'inspected');
+  });
+
   it('writes nothing, anywhere', async () => {
     const { root } = project();
     const { io } = await traceIo(() => runWorkspacePilot({
