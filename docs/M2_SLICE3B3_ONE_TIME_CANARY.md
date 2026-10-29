@@ -1,6 +1,6 @@
 # M2 Slice 3B3 — one-time canary authorization and review gate
 
-**Owner approval:** 2026-10-28. The owner explicitly authorized **one bounded, read-only invocation** against the **single pre-prepared, non-sensitive Git canary on the ThinkPad X240 running Linux**. The exact canonical path and three file hashes are specified in the owner's private conversation and the private [3B3-P preparation handoff](M2_SLICE3B3_PREPARATION.md). **Do not put the owner's home-directory path or personal machine identifiers in a public artifact.**
+**Owner approval:** 2026-10-28. The owner explicitly authorized **one bounded, read-only invocation** against the **single pre-prepared, non-sensitive Git canary on the owner-approved Linux host**. The exact canonical path and three file hashes are specified in the owner's private conversation and private preparation handoff; the public [3B3-P preparation contract](M2_SLICE3B3_PREPARATION.md) contains no private path. **Do not put the owner's home-directory path or personal machine identifiers in a public artifact.**
 
 **Main baseline:** `758926b7218f2170bde3a6705b47faf5da895545`, prior to this authorization. **This is a separate authorization from Option A pilot development.** It neither extends to another root nor allows repeat scans, arbitrary path selection, live `/naildown` wiring, publication or release.
 
