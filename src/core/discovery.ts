@@ -379,16 +379,197 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /sk-[A-Za-z0-9]{20,}/,                             // OpenAI-style secret keys
   /xox[baprs]-[A-Za-z0-9-]{10,}/,                    // Slack tokens
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,              // private key material
-  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,     // JWT-ish
-  // Long base64 blob. Requires mixed case *and* a digit so an ordinary long
-  // word or a repeated character is not mistaken for a secret: a blunt
-  // 40-character rule refused legitimate files as credential-like.
-  /(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}/,
 ];
+
+/** Shortest base64-like run worth calling a credential. */
+const BASE64_RUN_MIN = 40;
+
+/** A token carries at most this much `=` padding before the run ends. */
+const BASE64_PADDING = 2;
+
+const CODE_PLUS = 43;
+const CODE_SLASH = 47;
+const CODE_ZERO = 48;
+const CODE_NINE = 57;
+const CODE_UPPER_A = 65;
+const CODE_UPPER_Z = 90;
+const CODE_LOWER_A = 97;
+const CODE_LOWER_Z = 122;
+const CODE_PADDING = 61;
+
+/**
+ * Long base64-like runs that mix case *and* contain a digit, as `[start, end)`
+ * spans covering the run plus up to two `=` padding characters.
+ *
+ * This is a forward scan rather than the regular expression it replaced:
+ *
+ *   /(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}/
+ *
+ * That pattern was quadratic on a long homogeneous run. When the run lacks one
+ * required class - a 32 KiB run of lowercase letters has no uppercase - each of
+ * the three lookaheads re-scans to the end of the run from every starting
+ * position, so the cost is O(n^2): measured 1,330 ms for a single 32 KiB run on
+ * Node 24, and the policy reads up to six such files per selection.
+ *
+ * The two are equivalent: a run matches exactly when its whole length is at
+ * least 40 *and* it contains all three classes. A suffix can only contain all
+ * three when the whole run does, and position zero always has 40 characters
+ * available in a run that long, so the leftmost match is always the run itself.
+ * `test/discovery.test.ts` compares this against the expression above.
+ */
+function findBase64LikeSecrets(text: string): Array<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+  let index = 0;
+
+  while (index < text.length) {
+    if (!isBase64Char(text.charCodeAt(index))) {
+      index += 1;
+      continue;
+    }
+
+    const start = index;
+    let hasUppercase = false;
+    let hasLowercase = false;
+    let hasDigit = false;
+
+    while (index < text.length) {
+      const code = text.charCodeAt(index);
+      if (code >= CODE_UPPER_A && code <= CODE_UPPER_Z) hasUppercase = true;
+      else if (code >= CODE_LOWER_A && code <= CODE_LOWER_Z) hasLowercase = true;
+      else if (code >= CODE_ZERO && code <= CODE_NINE) hasDigit = true;
+      else if (code !== CODE_PLUS && code !== CODE_SLASH) break;
+      index += 1;
+    }
+
+    // A long word or a repeated character is not a secret: requiring all three
+    // classes is what keeps an ordinary long identifier out of this rule.
+    if (index - start < BASE64_RUN_MIN || !hasUppercase || !hasLowercase || !hasDigit) continue;
+
+    let end = index;
+    for (let pad = 0; pad < BASE64_PADDING && end < text.length && text.charCodeAt(end) === CODE_PADDING; pad += 1) {
+      end += 1;
+    }
+    spans.push([start, end]);
+    index = end;
+  }
+
+  return spans;
+}
+
+function isBase64Char(code: number): boolean {
+  return (code >= CODE_ZERO && code <= CODE_NINE)
+    || (code >= CODE_UPPER_A && code <= CODE_UPPER_Z)
+    || (code >= CODE_LOWER_A && code <= CODE_LOWER_Z)
+    || code === CODE_PLUS
+    || code === CODE_SLASH;
+}
+
+const JWT_PREFIX = 'eyJ';
+
+/** Shortest header/payload segment a JWT-ish token can have. */
+const JWT_SEGMENT_MIN = 10;
+
+const CODE_DOT = 46;
+const CODE_HYPHEN = 45;
+const CODE_UNDERSCORE = 95;
+
+/**
+ * JWT-ish tokens - `eyJ`, a header segment, `.`, a payload segment, `.` - as
+ * `[start, end)` spans.
+ *
+ * Replaces the expression:
+ *
+ *   /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./
+ *
+ * That expression was quadratic on runs dense in `eyJ` prefixes. Each attempt
+ * consumed the whole class run with `{10,}`, failed to find a `.`, then
+ * backtracked, so a 32 KiB synthetic run cost 840 ms in `containsSecretLikeContent`
+ * and again in `redactSecrets` - an exhaustion cost on input that is not even a
+ * token. Because `.` is not in the character class, backtracking can never find
+ * the delimiter inside the run, so a match needs the *maximal* run to end
+ * exactly at a `.`. Class runs are therefore located once and each `eyJ`
+ * occurrence is an O(1) check against them.
+ */
+function findJwtLikeSecrets(text: string): Array<readonly [number, number]> {
+  const runs = jwtClassRuns(text);
+  const spans: Array<readonly [number, number]> = [];
+  let searchFrom = 0;
+  let runIndex = 0;
+
+  for (;;) {
+    const start = text.indexOf(JWT_PREFIX, searchFrom);
+    if (start === -1) break;
+
+    const segmentStart = start + JWT_PREFIX.length;
+    while (runIndex < runs.length && runs[runIndex].end <= segmentStart) runIndex += 1;
+    const header = runs[runIndex];
+
+    // The header run must contain the position after `eyJ`, be long enough, and
+    // end at the first `.`. Then the payload run must start right after it.
+    let end: number | undefined;
+    if (header !== undefined && header.start <= segmentStart
+      && header.end - segmentStart >= JWT_SEGMENT_MIN
+      && text.charCodeAt(header.end) === CODE_DOT) {
+      const payload = runs[runIndex + 1];
+      if (payload !== undefined && payload.start === header.end + 1
+        && payload.end - payload.start >= JWT_SEGMENT_MIN
+        && text.charCodeAt(payload.end) === CODE_DOT) {
+        end = payload.end + 1;
+      }
+    }
+
+    if (end === undefined) {
+      searchFrom = start + 1;
+      continue;
+    }
+    spans.push([start, end]);
+    searchFrom = end;
+  }
+
+  return spans;
+}
+
+/** Maximal runs of `[A-Za-z0-9_-]`, in order. */
+function jwtClassRuns(text: string): Array<{ start: number; end: number }> {
+  const runs: Array<{ start: number; end: number }> = [];
+  let index = 0;
+  while (index < text.length) {
+    if (!isJwtChar(text.charCodeAt(index))) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    while (index < text.length && isJwtChar(text.charCodeAt(index))) index += 1;
+    runs.push({ start, end: index });
+  }
+  return runs;
+}
+
+function isJwtChar(code: number): boolean {
+  return (code >= CODE_ZERO && code <= CODE_NINE)
+    || (code >= CODE_UPPER_A && code <= CODE_UPPER_Z)
+    || (code >= CODE_LOWER_A && code <= CODE_LOWER_Z)
+    || code === CODE_HYPHEN
+    || code === CODE_UNDERSCORE;
+}
+
+/** Replaces every span with one `[redacted]` marker, in order. */
+function redactSpans(text: string, spans: readonly (readonly [number, number])[]): string {
+  if (spans.length === 0) return text;
+  let redacted = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    redacted += text.slice(cursor, start) + '[redacted]';
+    cursor = end;
+  }
+  return redacted + text.slice(cursor);
+}
 
 /** True when the text contains something that looks like a credential. */
 export function containsSecretLikeContent(text: string): boolean {
-  return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  if (findJwtLikeSecrets(text).length > 0) return true;
+  return findBase64LikeSecrets(text).length > 0;
 }
 
 /**
@@ -401,7 +582,12 @@ export function redactSecrets(text: string): string {
   for (const pattern of SECRET_PATTERNS) {
     output = output.replace(new RegExp(pattern.source, 'g'), '[redacted]');
   }
-  return output;
+
+  // The two scanned rules keep the order the patterns they replaced had - JWT
+  // before base64 - so a token that only becomes visible after an earlier
+  // redaction is still caught.
+  const withJwt = redactSpans(output, findJwtLikeSecrets(output));
+  return redactSpans(withJwt, findBase64LikeSecrets(withJwt));
 }
 
 /** Strict UTF-8 decoding. Invalid sequences are refused, never replaced. */

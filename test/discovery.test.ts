@@ -971,3 +971,229 @@ describe('purity', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2 Slice 3B1: the base64-like secret rule is a linear scan, not a regex with
+// repeated unanchored lookaheads.
+//
+// The oracle below is the implementation this replaced, transcribed verbatim.
+// Comparing against it is what makes "same answer, linear cost" checkable rather
+// than a claim: it pins equivalence on every generated case, so a future edit to
+// the scanner that changes behaviour fails here instead of shipping.
+// ---------------------------------------------------------------------------
+
+describe('secrets: base64-like rule matches the expression it replaced', () => {
+  const ORACLE = [
+    /AKIA[0-9A-Z]{16}/,
+    /ASIA[0-9A-Z]{16}/,
+    /gh[pousr]_[A-Za-z0-9]{20,}/,
+    /sk-[A-Za-z0-9]{20,}/,
+    /xox[baprs]-[A-Za-z0-9-]{10,}/,
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,
+    /(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{40,}={0,2}/,
+  ] as const;
+
+  function oracleRedact(text: string): string {
+    let out = text;
+    for (const pattern of ORACLE) out = out.replace(new RegExp(pattern.source, 'g'), '[redacted]');
+    return out;
+  }
+
+  function oracleDetects(text: string): boolean {
+    return ORACLE.some((pattern) => pattern.test(text));
+  }
+
+  /** Deterministic, so a failure reproduces exactly. */
+  function lcg(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 0x100000000;
+    };
+  }
+
+  const MIXED = 'aB3'.repeat(200);
+  const NO_UPPER = 'ab3'.repeat(200);
+  const NO_LOWER = 'AB3'.repeat(200);
+  const NO_DIGIT = 'aBc'.repeat(200);
+  const PLAIN_LOWER = 'a'.repeat(600);
+
+  const cases: Array<readonly [string, string]> = [
+    ['empty', ''],
+    ['plain lower', PLAIN_LOWER],
+    ['no uppercase', NO_UPPER],
+    ['no lowercase', NO_LOWER],
+    ['no digit', NO_DIGIT],
+    ['39 of a mixed run', MIXED.slice(0, 39)],
+    ['40 of a mixed run', MIXED.slice(0, 40)],
+    ['41 of a mixed run', MIXED.slice(0, 41)],
+    ['one pad', MIXED.slice(0, 40) + '='],
+    ['two pads', MIXED.slice(0, 40) + '=='],
+    ['three pads', MIXED.slice(0, 40) + '==='],
+    ['pads then more', MIXED.slice(0, 40) + '==aB3' + MIXED.slice(0, 40)],
+    ['two runs', MIXED.slice(0, 40) + ' ' + MIXED.slice(0, 40)],
+    ['adjacent runs', MIXED.slice(0, 40) + '+' + MIXED.slice(0, 40)],
+    ['run after text', 'prefix: ' + MIXED.slice(0, 60)],
+    ['nonexistent classes at the tail', PLAIN_LOWER.slice(0, 40) + 'A1'],
+    ['aws', ['AKIA', 'ABCDEFGHIJKLMNOP'].join('')],
+    ['github', ['ghp', '_', 'a'.repeat(32)].join('')],
+    ['jwt-ish', ['eyJ', 'hbGciOiJIUzI1NiJ9', '.', 'eyJzdWIiOiIxMjM0In0', '.'].join('')],
+    ['jwt header 9, too short', 'eyJ' + 'a'.repeat(9) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt header 10, exactly enough', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt header 11', 'eyJ' + 'a'.repeat(11) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt payload 9, too short', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(9) + '.'],
+    ['jwt missing the trailing dot', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10)],
+    ['jwt missing every dot', 'eyJ' + 'a'.repeat(30)],
+    ['jwt two tokens', 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.' + ' ' + 'eyJ' + 'c'.repeat(10) + '.' + 'd'.repeat(10) + '.'],
+    ['jwt in prose', 'note the token eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '. thanks'],
+    ['jwt prefix repeated, no dots', 'eyJ'.repeat(40)],
+    ['jwt prefix then a short run', 'eyJeyJa'],
+    ['jwt with underscore and hyphen', 'eyJ' + '_'.repeat(5) + '-'.repeat(5) + '.' + '_'.repeat(10) + '.'],
+    ['jwt adjacent to class chars', 'zzzeyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.zzz'],
+    // Each of these three was found by mutation testing: removing the guard they
+    // exercise left every test green, which meant the guard was untested.
+    ['jwt space where the first dot belongs', 'eyJ' + 'a'.repeat(10) + ' ' + 'b'.repeat(10) + '.'],
+    ['jwt dot immediately after the prefix', 'eyJ' + '.' + 'b'.repeat(10) + '.'],
+    ['jwt nested prefix inside the header', 'eyJ' + 'eyJ' + 'a'.repeat(10) + '.' + 'b'.repeat(10) + '.'],
+    ['jwt dot, run, dot, run, dot', 'eyJ' + '.' + 'b'.repeat(10) + '.' + 'c'.repeat(10) + '.'],
+    ['jwt space after the first dot', 'eyJ' + 'a'.repeat(10) + '.' + ' ' + 'b'.repeat(10) + '.'],
+  ];
+
+  it('agrees with the oracle on handwritten boundary cases', () => {
+    for (const [label, text] of cases) {
+      assert.equal(containsSecretLikeContent(text), oracleDetects(text), `detect: ${label}`);
+      assert.equal(redactSecrets(text), oracleRedact(text), `redact: ${label}`);
+    }
+  });
+
+  it('agrees with the oracle on generated text', () => {
+    const alphabet = 'aAbB012+/= _-.:\n';
+    const random = lcg(0x5eed);
+    for (let caseIndex = 0; caseIndex < 300; caseIndex += 1) {
+      const length = Math.floor(random() * 260);
+      let text = '';
+      for (let i = 0; i < length; i += 1) {
+        text += alphabet[Math.floor(random() * alphabet.length)];
+      }
+      assert.equal(containsSecretLikeContent(text), oracleDetects(text), `detect case ${caseIndex}: ${JSON.stringify(text)}`);
+      assert.equal(redactSecrets(text), oracleRedact(text), `redact case ${caseIndex}: ${JSON.stringify(text)}`);
+    }
+  });
+
+  it('agrees with the oracle on text dense in JWT prefixes', () => {
+    // The shape that made the replaced expression quadratic: `eyJ` everywhere and
+    // almost no delimiters. Correctness has to survive it, not just speed.
+    const tokens = ['eyJ', 'a', 'A', '0', '_', '-', '.', ' ', 'x'];
+    const random = lcg(0x1e7);
+    for (let caseIndex = 0; caseIndex < 200; caseIndex += 1) {
+      const pieces = Math.floor(random() * 24);
+      let text = '';
+      for (let i = 0; i < pieces; i += 1) {
+        text += tokens[Math.floor(random() * tokens.length)];
+      }
+      assert.equal(containsSecretLikeContent(text), oracleDetects(text), `detect case ${caseIndex}: ${JSON.stringify(text)}`);
+      assert.equal(redactSecrets(text), oracleRedact(text), `redact case ${caseIndex}: ${JSON.stringify(text)}`);
+    }
+  });
+
+  it('agrees with the oracle on every six-part composition of the decisive pieces', () => {
+    // Six slots so the full shape lands in scope: prefix, a minimum-length run,
+    // the delimiter, and a near-delimiter. Four guards only fail on specific
+    // arrangements of these, and they were each found by mutation testing.
+    const parts = ['eyJ', 'a'.repeat(10), '.', ' '];
+    const walk = (remaining: number, built: string): void => {
+      if (remaining === 0) {
+        assert.equal(containsSecretLikeContent(built), oracleDetects(built), `detect: ${JSON.stringify(built)}`);
+        assert.equal(redactSecrets(built), oracleRedact(built), `redact: ${JSON.stringify(built)}`);
+        return;
+      }
+      for (const part of parts) walk(remaining - 1, built + part);
+    };
+    walk(6, '');
+  });
+
+  it('agrees with the oracle on every short composition of JWT pieces', () => {
+    // Exhaustive over the pieces that decide a boundary: the prefix, a run at the
+    // minimum length, one just under it, the delimiter, near-delimiters, and a
+    // class character. Exhaustive rather than random, because the three guards
+    // that matter only fail on specific compositions.
+    const parts = ['eyJ', 'a'.repeat(10), 'a'.repeat(9), '.', ' ', '_', '-', 'X'];
+    const compose = (count: number, prefix: string): void => {
+      if (count === 0) {
+        assert.equal(containsSecretLikeContent(prefix), oracleDetects(prefix), `detect: ${JSON.stringify(prefix)}`);
+        assert.equal(redactSecrets(prefix), oracleRedact(prefix), `redact: ${JSON.stringify(prefix)}`);
+        return;
+      }
+      for (const part of parts) compose(count - 1, prefix + part);
+    };
+    for (let length = 3; length <= 4; length += 1) compose(length, '');
+  });
+
+  it('stays linear on JWT prefix runs', () => {
+    // Guards the second quadratic the review found: 32 KiB of `eyJ` repeats cost
+    // ~840 ms per call before this change. Generous bound; the oracle above is the
+    // correctness test.
+    const text = 'eyJ'.repeat(Math.ceil(32_768 / 3)).slice(0, 32_768);
+    const start = performance.now();
+    assert.equal(containsSecretLikeContent(text), false);
+    assert.equal(redactSecrets(text), text);
+    const elapsed = performance.now() - start;
+    assert.ok(elapsed < 250, `32 KiB of eyJ repeats took ${elapsed.toFixed(1)} ms; it was ~840 ms per pass before the change`);
+  });
+
+  it('keeps a long single-character run out of the rule at every size', () => {
+    // The false-positive guard that motivated the mixed-class requirement.
+    for (const size of [40, 41, 1_000, 32_768]) {
+      const text = 'a'.repeat(size);
+      assert.equal(containsSecretLikeContent(text), false, `size ${size}`);
+      assert.equal(redactSecrets(text), text, `size ${size} must not be rewritten`);
+    }
+  });
+
+  it('still redacts real fake credentials and leaves the rest of the text alone', () => {
+    const aws = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
+    const github = ['ghp', '_', 'a'.repeat(32)].join('');
+    const slack = ['xoxb', '-', '1234567890-abcdef'].join('');
+    const privateKey = ['-----BEGIN ', 'RSA PRIVATE KEY', '-----'].join('');
+    const text = `${aws} and ${github} and ${slack} and ${privateKey}`;
+
+    assert.equal(containsSecretLikeContent(text), true);
+    const redacted = redactSecrets(text);
+    for (const fake of [aws, github, slack, privateKey]) {
+      assert.equal(redacted.includes(fake), false, 'a fake credential survived redaction');
+    }
+    assert.equal(redacted.split('[redacted]').length - 1, 4);
+    assert.match(redacted, /and/);
+  });
+
+  it('redacts several base64-like tokens in one pass', () => {
+    const token = 'aB3'.repeat(20);                 // 60 characters, one token
+    const text = `first ${token} then ${token}== last`;
+    const redacted = redactSecrets(text);
+    assert.equal(redacted.split('[redacted]').length - 1, 2);
+    assert.equal(redacted.includes(token), false);
+  });
+
+  it('stays linear on the input that used to be quadratic', () => {
+    // A wall-clock guard, deliberately generous: the scan is one forward pass, so
+    // the only way to exceed this is to reintroduce repeated scanning. Support,
+    // not proof - equivalence above is the correctness test.
+    const text = 'a'.repeat(32_768);
+    const start = performance.now();
+    assert.equal(containsSecretLikeContent(text), false);
+    assert.equal(redactSecrets(text), text);
+    const elapsed = performance.now() - start;
+    assert.ok(elapsed < 250, `32 KiB homogeneous scan took ${elapsed.toFixed(1)} ms; it was ~1330 ms per pass before the change`);
+  });
+
+  it('keeps the policy selecting a near-ceiling file of homogeneous text', () => {
+    // The real policy path: a 32 KiB file at the per-file ceiling, full of the
+    // text that previously cost a second per scan. It must still be read and
+    // kept, not refused as credential-like.
+    const body = 'a'.repeat(DEFAULT_BUDGET.maxFileBytes);
+    const result = selectCandidates({ reader: makeReader({ 'README.md': body }), consent: CONSENT });
+    assert.deepEqual(selected(result).files.map((file) => file.path), ['README.md']);
+    assert.equal(rejectionFor(result, 'README.md'), undefined);
+  });
+});
