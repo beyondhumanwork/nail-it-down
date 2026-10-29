@@ -1,7 +1,8 @@
 # Architecture review gate
 
 **Historical M0 status:** Host-feasibility spike formally accepted — 2026-10-25 (with documented M0-09 exception).
-**Current M1 status:** The scoped deterministic interview passed technical acceptance on 2026-10-27; see [M1 acceptance and limitations](M1_ACCEPTANCE.md). The full product v0.1 specification remains DRAFT. M2 and later work are not authorized.
+**M1 status:** The scoped deterministic interview passed technical acceptance on 2026-10-27; see [M1 acceptance and limitations](M1_ACCEPTANCE.md).
+**M2 status (2026-10-28):** M2 Slices 1–3B2 have narrowly scoped technical acceptances. One explicitly approved real-root canary in 3B3 reported success, but the formal status is **TECHNICAL PASS — OPERATIONAL VERIFICATION INCOMPLETE**; see [3B3 closeout](M2_SLICE3B3_CLOSEOUT.md). Its one-time read authorization is **consumed**. The owner authorized a narrowly scoped **M2 Slice 4 synthetic-only prototype and reader-correctness work** per [M2-4 contract](M2_SLICE4_CONTRACT.md), plus a review PR for two local 3B3 commits. **None are accepted or merged by that authorization.** Installed `/naildown` integration, new real-repository reads, model calls, M3, and release remain unauthorized. The full product v0.1 specification remains DRAFT.
 
 The project owner authorized continued development after approving the repository foundation on 2026-10-20. This is recorded as permission to proceed with the narrowly defined **M0 technical feasibility spike only**, not blanket acceptance of every future product, privacy, branding, or release decision.
 
