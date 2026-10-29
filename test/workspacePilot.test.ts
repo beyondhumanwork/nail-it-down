@@ -612,6 +612,28 @@ describe('pilot: bounded reading and honest evidence', () => {
     assert.ok(result.evidenceGap !== undefined, 'the gap must be explained, not left blank');
   });
 
+  it('digests exactly the bytes it read, without reading again', async () => {
+    const { root } = project();
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+      authorization: authorizationFor(root),
+    }));
+
+    assert.equal(result.kind, 'inspected');
+    if (result.kind !== 'inspected') return;
+
+    const { createHash } = await import('node:crypto');
+    for (const file of result.files) {
+      const expected = createHash('sha256')
+        .update(fs.readFileSync(nodePath.join(root, file.path), 'utf8'), 'utf8')
+        .digest('hex');
+      assert.match(file.sha256, /^[0-9a-f]{64}$/);
+      assert.equal(file.sha256, expected, `${file.path} digest must match its content`);
+    }
+    // One open per kept file: the digest added no read.
+    assert.equal(io.opens, result.files.length);
+  });
+
   it('writes nothing, anywhere', async () => {
     const { root } = project();
     const { io } = await traceIo(() => runWorkspacePilot({

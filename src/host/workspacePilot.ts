@@ -28,6 +28,7 @@
  * establish that a mount is local.
  */
 
+import { createHash } from 'node:crypto';
 import * as nodePath from 'node:path';
 
 import type { ModUi } from './modApi.ts';
@@ -102,6 +103,24 @@ export type PilotRefusalReason =
  */
 export type PilotRootRejection = RootRejection | 'unexpected-canonical-root';
 
+/**
+ * A read file plus a digest of exactly the text this invocation obtained.
+ *
+ * M2 Slice 3B3 needs to prove that the files it cites are the files it expected,
+ * and the one-time canary budget forbids reading them a second time to do it.
+ * Hashing the text already in hand keeps the check inside the budget and adds no
+ * filesystem work.
+ *
+ * The digest is over the decoded UTF-8 text, which re-encodes to the original
+ * bytes for any valid UTF-8 file. The single exception is a leading byte-order
+ * mark: `TextDecoder` strips it, so a BOM-prefixed file would digest without it.
+ * The preparation fixture has no BOM; a canary comparing against a raw
+ * `sha256sum` would fail closed rather than silently match.
+ */
+export type PilotFileSummary = PreviewFileSummary & {
+  sha256: string;
+};
+
 export type PilotRoot = {
   /** Exactly what the person supplied, lexically resolved. Shown before any read. */
   proposed: string;
@@ -118,7 +137,7 @@ export type PilotResult =
   | {
     kind: 'inspected';
     root: PilotRoot;
-    files: PreviewFileSummary[];
+    files: PilotFileSummary[];
     skipped: PreviewSkipped[];
     declarations: PreviewDeclaration[];
     evidenceGap?: string;
@@ -295,11 +314,13 @@ export async function runWorkspacePilot(input: {
     return { kind: 'nothing-to-read', detail: selection.detail, disclosure };
   }
 
-  const files: PreviewFileSummary[] = selection.files.map((file) => ({
+  const files: PilotFileSummary[] = selection.files.map((file) => ({
     path: file.path,
     kind: file.kind,
     lines: file.lines,
     bytes: file.bytes,
+    // Computed from the text already read: no second open, no extra bytes.
+    sha256: createHash('sha256').update(file.text, 'utf8').digest('hex'),
   }));
   const skipped: PreviewSkipped[] = selection.rejected.map((entry) => ({
     path: entry.path,
