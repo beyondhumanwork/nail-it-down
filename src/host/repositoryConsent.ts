@@ -55,13 +55,32 @@ function readableSummary(): string {
 }
 
 /**
+ * Extra facts the caller wants on the decision surface itself, next to the
+ * choice rather than only in a preceding notice.
+ *
+ * Added for M2 Slice 3B2 without changing any existing behaviour: callers that
+ * pass nothing get exactly the dialog they got before.
+ */
+export type ConsentDetail = {
+  /** The exact workspace root the grant would cover. */
+  root: string;
+  /** A short, honest statement of the residual filesystem risk. */
+  risk: string;
+};
+
+/**
  * The dialog's options, refusal first.
  *
  * The grant description states the limits and — importantly — that nothing is
  * sent anywhere in this slice. A person agreeing to a local read has not agreed
  * to model transmission, and the two must not be blurred.
  */
-export function consentOptions(): ReadonlyArray<{ label: string; description: string }> {
+export function consentOptions(detail?: ConsentDetail): ReadonlyArray<{ label: string; description: string }> {
+  const grant = [
+    `Reads at most ${DEFAULT_BUDGET.maxFiles} of these root files,`,
+    `${DEFAULT_BUDGET.maxFileBytes / 1024} KiB each and ${DEFAULT_BUDGET.maxTotalBytes / 1024} KiB in total.`,
+    'Nothing read this way is sent to a model or any external service.',
+  ].join(' ');
   return [
     {
       label: CONSENT_LABELS.refuse,
@@ -69,11 +88,12 @@ export function consentOptions(): ReadonlyArray<{ label: string; description: st
     },
     {
       label: CONSENT_LABELS.grant,
-      description: [
-        `Reads at most ${DEFAULT_BUDGET.maxFiles} of these root files,`,
-        `${DEFAULT_BUDGET.maxFileBytes / 1024} KiB each and ${DEFAULT_BUDGET.maxTotalBytes / 1024} KiB in total.`,
-        'Nothing read this way is sent to a model or any external service.',
-      ].join(' '),
+      // The root and the risk belong on the choice itself: a notice above the
+      // dialog can scroll away, and a grant must be made against the exact
+      // directory and the exact residual risk it covers.
+      description: detail === undefined
+        ? grant
+        : `${grant} Root: ${detail.root}. Risk: ${detail.risk}`,
     },
   ];
 }
@@ -97,6 +117,7 @@ export function consentDisclosure(): string {
  */
 export async function requestRepositoryReadConsent(
   ui: ModUi | undefined,
+  detail?: ConsentDetail,
 ): Promise<RepositoryConsentOutcome> {
   if (ui === undefined || typeof ui.select !== 'function') {
     return { kind: 'refused', reason: 'headless' };
@@ -110,7 +131,7 @@ export async function requestRepositoryReadConsent(
 
   let picked: string | undefined;
   try {
-    picked = await ui.select({ title: CONSENT_TITLE, options: consentOptions() });
+    picked = await ui.select({ title: CONSENT_TITLE, options: consentOptions(detail) });
   } catch {
     // A dialog that failed is not an answer. No error text is surfaced: it is
     // host text and this decision does not need it.

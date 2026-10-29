@@ -13,7 +13,7 @@
  * touches it.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -53,7 +53,11 @@ type FixtureResult =
 function createFixture(): FixtureResult {
   let parent: string | undefined;
   try {
-    parent = mkdtempSync(join(tmpdir(), 'nid-pilot-mod-'));
+    // Minted under the *canonical* temp directory. On macOS `os.tmpdir()` is
+    // /var/folders/... and resolves to /private/var/folders/..., and the pilot
+    // refuses any root that resolves somewhere other than the approved path - so
+    // the fixture has to be born canonical rather than be excused afterwards.
+    parent = mkdtempSync(join(realpathSync(tmpdir()), 'nid-pilot-mod-'));
     const root = join(parent, 'project');
     mkdirSync(root);
     writeFileSync(join(root, 'README.md'), README);

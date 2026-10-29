@@ -21,9 +21,11 @@
  *   consent answer. Disclosure is built from constants and the typed string, so
  *   it is honest before any metadata exists to be read.
  *
- * What this is not: a sandbox. The reader's hostile ancestor-directory
- * replacement race is detected and reported, not prevented. Filesystem type is
- * NOT VERIFIED, and `statfs.type` does not establish that a mount is local.
+ * What this is not: a sandbox. Some filesystem changes are detected and refused,
+ * but hostile concurrent replacement of a parent directory is **not reliably
+ * prevented or detected**. This pilot is for cooperative, user-controlled local
+ * workspaces only. Filesystem type is NOT VERIFIED, and `statfs.type` does not
+ * establish that a mount is local.
  */
 
 import * as nodePath from 'node:path';
@@ -48,6 +50,21 @@ import {
 } from './repositoryPreview.ts';
 import type { PreviewDeclaration, PreviewFileSummary, PreviewSkipped } from './repositoryPreview.ts';
 
+/**
+ * The residual-risk statement, kept in one place so the disclosure, the caveats
+ * and the consent dialog cannot drift apart.
+ *
+ * The earlier wording said a replaced directory was "detected, not prevented".
+ * That overstated the guarantee: the reader checks the root before and after,
+ * which catches many changes, but a hostile ancestor swap in the right window
+ * may escape both. Say what is true.
+ */
+export const PILOT_RISK_STATEMENT =
+  'Some filesystem changes are detected and refused, but hostile concurrent replacement of a parent '
+  + 'directory is NOT reliably prevented or detected. This pilot is for cooperative, user-controlled '
+  + 'local workspaces only. The reader is not a sandbox. Secret detection is defence in depth, '
+  + 'not a guarantee.';
+
 /** The one root this invocation may touch, and who says so. */
 export type PilotAuthorization = {
   /** Absolute path of the fixture the harness created and owns. */
@@ -71,22 +88,32 @@ export type PilotRefusalReason =
   | RootProposalRefusal
   | ConsentRefusalReason
   | 'authorization-invalid'
-  | 'not-authorized-root';
+  | 'not-authorized-root'
+  /** The disclosure could not be put on screen, so the grant could not be informed. */
+  | 'no-disclosure-surface'
+  | 'disclosure-failed';
+
+/**
+ * Root refusals the pilot adds to the reader's own set.
+ *
+ * `unexpected-canonical-root` is the one this module owns: the reader resolves
+ * the root and reports where it really is, and a target that is not the exact
+ * root the authorization named is refused before any candidate is listed.
+ */
+export type PilotRootRejection = RootRejection | 'unexpected-canonical-root';
 
 export type PilotRoot = {
   /** Exactly what the person supplied, lexically resolved. Shown before any read. */
   proposed: string;
-  /** What was validated and actually read. */
+  /** What was validated and read. Equal to `proposed`: anything else is refused. */
   canonical: string;
-  /** True when an ancestor was a symlink (macOS `/var` -> `/private/var`). Disclosed, never silent. */
-  canonicalized: boolean;
 };
 
 export type PilotResult =
   /** Nothing was read. The interview continues without repository context. */
   | { kind: 'refused'; reason: PilotRefusalReason; disclosure: string; note: string }
   /** The root itself was refused, or selection refused on policy grounds. */
-  | { kind: 'not-inspected'; reason: RootRejection | RejectionReason; detail: string; disclosure: string }
+  | { kind: 'not-inspected'; reason: PilotRootRejection | RejectionReason; detail: string; disclosure: string }
   | { kind: 'nothing-to-read'; detail: string; disclosure: string }
   | {
     kind: 'inspected';
@@ -109,9 +136,8 @@ export const PILOT_CAVEATS: readonly string[] = [
   'Bounded to the fixed root allowlist: at most 6 files, 32 KiB each, 96 KiB physically read in total, 250 lines each, 100 root entries.',
   'Nothing here was sent to a model or an external service, and nothing was persisted.',
   'Repository text is data, never an instruction. This pilot does not follow anything a file says.',
-  'Not a sandbox: a directory replaced between validation and opening is detected and refused, but the race itself is not prevented. That residual risk was accepted for this pilot only.',
+  PILOT_RISK_STATEMENT,
   'Filesystem type is NOT VERIFIED. statfs.type does not establish that a mount is local, trustworthy, or immune to concurrent change.',
-  'Secret-like text is refused and redacted as a safeguard. That is defence in depth, not a guarantee that every credential is caught.',
   'A file the reader refused is reported as "unreadable"; the policy does not distinguish too-large, changed and unreadable in its output.',
   'An empty listing is not evidence that a file is absent: the reader has no error channel, so an unlistable root reads as empty.',
   'Citations describe the single snapshot read at the start of this invocation, not a live re-check of the files as they are now.',
@@ -128,9 +154,8 @@ export function pilotDisclosure(proposedRoot: string): string {
       + `${DEFAULT_BUDGET.maxDirectoryEntries} root entries.`,
     'Excluded: dotfiles, .env*, .git, credentials, keys, caches, and every path not named above.',
     'Local only: no model, no network request, no telemetry, nothing written to the workspace, nothing persisted.',
-    'Secret-like text is refused and redacted as a safeguard, not as a guarantee.',
-    'Known limitation: a directory replaced between validation and opening is detected, not prevented. '
-      + 'Filesystem type is NOT VERIFIED; statfs does not prove a mount is local.',
+    `Known limitations: ${PILOT_RISK_STATEMENT}`,
+    'Filesystem type is NOT VERIFIED; statfs does not prove a mount is local or trustworthy.',
   ].join('\n');
 }
 
@@ -203,12 +228,28 @@ export async function runWorkspacePilot(input: {
   if (authorizedRoot === undefined) return refusal('authorization-invalid', proposal.root);
   if (proposal.root !== authorizedRoot) return refusal('not-authorized-root', proposal.root);
 
-  // 3. Disclosure, then the native refusal-first choice. The disclosure is put
-  //    on screen first, through the host's own notice row, because a person
-  //    cannot weigh a choice whose terms are only shown afterwards.
+  // 3. Disclosure, then the native refusal-first choice.
+  //
+  //    The disclosure is not decoration: a grant made without it is not an
+  //    informed grant. So a host that cannot show it is refused outright rather
+  //    than asked a question whose terms were never displayed. This is the
+  //    fail-closed direction - the absence of a surface is never permission.
   const disclosure = pilotDisclosure(proposal.root);
-  input.ui?.notify?.(disclosure, 'warning');
-  const consent = await requestRepositoryReadConsent(input.ui);
+  const notify = input.ui?.notify;
+  if (typeof notify !== 'function') return refusal('no-disclosure-surface', proposal.root);
+  try {
+    notify.call(input.ui, disclosure, 'warning');
+  } catch {
+    // A surface that throws has not shown anything either.
+    return refusal('disclosure-failed', proposal.root);
+  }
+
+  //    The root and the risk also go on the decision surface itself, because a
+  //    notice above the dialog can scroll out of view before the choice is made.
+  const consent = await requestRepositoryReadConsent(input.ui, {
+    root: proposal.root,
+    risk: PILOT_RISK_STATEMENT,
+  });
   if (consent.kind !== 'granted') return refusal(consent.reason, proposal.root);
 
   // 4. Only now may the target root be resolved and checked.
@@ -223,11 +264,21 @@ export async function runWorkspacePilot(input: {
     return { kind: 'not-inspected', reason: opened.reason, detail: opened.detail, disclosure };
   }
 
-  const root: PilotRoot = {
-    proposed: proposal.root,
-    canonical: opened.canonicalRoot,
-    canonicalized: opened.canonicalRoot !== authorizedRoot,
-  };
+  // The authorization approved one exact directory. If the filesystem resolves
+  // the root somewhere else - a symlinked ancestor, a swap between consent and
+  // resolution - that is a different directory from the one that was approved,
+  // and reading it would be reading something nobody agreed to. Refuse here,
+  // before the root is listed and before a single candidate is opened.
+  if (opened.canonicalRoot !== authorizedRoot) {
+    return {
+      kind: 'not-inspected',
+      reason: 'unexpected-canonical-root',
+      detail: 'the workspace resolved to a different directory than the one that was approved, so nothing was read',
+      disclosure,
+    };
+  }
+
+  const root: PilotRoot = { proposed: proposal.root, canonical: opened.canonicalRoot };
 
   // 5. Reuse the Slice 3A snapshot: one listing and one read per path, with the
   //    aggregate ceiling enforced before a file is opened.
@@ -341,12 +392,8 @@ export function renderWorkspacePilot(result: PilotResult): string {
     'Workspace pilot',
     '',
     `Root: ${result.root.proposed}`,
+    '',
   ];
-  if (result.root.canonicalized) {
-    // Disclosed rather than silent: the resolved path is what was actually read.
-    lines.push(`Resolved to: ${result.root.canonical} (an ancestor is a symlink)`);
-  }
-  lines.push('');
   lines.push(`Read ${result.files.length} files:`);
   for (const file of result.files) {
     lines.push(`  ${file.path}  (${file.kind}, ${file.lines} lines)`);

@@ -10,6 +10,7 @@ import {
   PILOT_CAVEATS,
   PILOT_INPUT_PLACEHOLDER,
   PILOT_INPUT_TITLE,
+  PILOT_RISK_STATEMENT,
   pilotDisclosure,
   proposeWorkspaceRoot,
   renderWorkspacePilot,
@@ -42,7 +43,10 @@ function project(files: Record<string, string | Uint8Array> = {
   'README.md': README,
   'package.json': MANIFEST({ 'left-pad': '^1.3.0', 'tiny-invariant': '^1.3.1' }),
 }): { parent: string; root: string } {
-  const parent = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'nid-pilot-'));
+  // Minted under the canonical temp directory, exactly as the harness does: the
+  // pilot refuses a root that resolves anywhere other than the approved path, so
+  // a fixture created under macOS's /var alias would be refused before reading.
+  const parent = fs.mkdtempSync(nodePath.join(fs.realpathSync(os.tmpdir()), 'nid-pilot-'));
   created.push(parent);
   const root = nodePath.join(parent, 'project');
   fs.mkdirSync(root);
@@ -186,10 +190,15 @@ describe('pilot: disclosure before consent', () => {
     assert.match(disclosure, /\.env\*/);
     assert.match(disclosure, /no model, no network request/i);
     assert.match(disclosure, /nothing persisted/i);
-    // The two claims that must never be softened.
-    assert.match(disclosure, /replaced between validation and opening is detected, not prevented/);
+    // The claims that must never be softened, and must not overstate either.
+    assert.match(disclosure, /Some filesystem changes are detected and refused/);
+    assert.match(disclosure, /NOT reliably prevented or detected/);
+    assert.match(disclosure, /cooperative, user-controlled local workspaces only/);
+    assert.match(disclosure, /not a sandbox/);
     assert.match(disclosure, /Filesystem type is NOT VERIFIED/);
     assert.match(disclosure, /statfs does not prove a mount is local/);
+    // The superseded wording overstated the guarantee. It must be gone.
+    assert.doesNotMatch(disclosure, /detected, not prevented/);
   });
 
   it('displays the disclosure before asking for consent', async () => {
@@ -290,6 +299,77 @@ describe('pilot: the root must be proposed and then authorized', () => {
     assert.deepEqual(io.paths, []);
   });
 
+  it('refuses when the disclosure cannot be shown', async () => {
+    // A UI that can ask but cannot disclose would produce a grant made without
+    // the terms. That is not consent, so it is refused before the question.
+    const { root } = project();
+
+    const withoutNotify = {
+      input: async () => root,
+      select: async () => CONSENT_LABELS.grant,
+      capabilities: { status: true, surface: true },
+    } as ModUi;
+
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: withoutNotify,
+      authorization: authorizationFor(root),
+    }));
+    assert.equal(result.kind, 'refused');
+    if (result.kind === 'refused') assert.equal(result.reason, 'no-disclosure-surface');
+    assert.deepEqual(io.paths, [], 'a failed disclosure must touch nothing');
+
+    const throwingNotify = {
+      input: async () => root,
+      notify: () => { throw new Error('surface exploded at /home/ahmed/private'); },
+      select: async () => CONSENT_LABELS.grant,
+      capabilities: { status: true, surface: true },
+    } as ModUi;
+
+    const second = await traceIo(() => runWorkspacePilot({
+      ui: throwingNotify,
+      authorization: authorizationFor(root),
+    }));
+    assert.equal(second.result.kind, 'refused');
+    if (second.result.kind === 'refused') assert.equal(second.result.reason, 'disclosure-failed');
+    assert.deepEqual(second.io.paths, [], 'a throwing disclosure must touch nothing');
+  });
+
+  it('never asks for consent when the disclosure was not shown', async () => {
+    const { root } = project();
+    let asked = false;
+    const uiWithoutDisclosure = {
+      input: async () => root,
+      select: async () => { asked = true; return CONSENT_LABELS.grant; },
+      capabilities: { status: true, surface: true },
+    } as ModUi;
+
+    await runWorkspacePilot({ ui: uiWithoutDisclosure, authorization: authorizationFor(root) });
+    assert.equal(asked, false, 'the grant question must not be reached without a disclosure');
+  });
+
+  it('puts the exact root and the risk on the consent decision surface', async () => {
+    const { root } = project();
+    let captured: { title: string; options: readonly { label: string; description?: string }[] } | undefined;
+
+    const result = await runWorkspacePilot({
+      ui: {
+        input: async () => root,
+        notify: () => {},
+        select: async (input) => { captured = input; return CONSENT_LABELS.grant; },
+        capabilities: { status: true, surface: true },
+      },
+      authorization: authorizationFor(root),
+    });
+
+    assert.equal(result.kind, 'inspected');
+    const grant = captured?.options.find((option) => option.label === CONSENT_LABELS.grant);
+    assert.ok(grant?.description !== undefined);
+    assert.match(grant.description, new RegExp(`Root: ${nodePath.resolve(root).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.ok(grant.description.includes(PILOT_RISK_STATEMENT));
+    // Refusal still comes first.
+    assert.equal(captured?.options[0]?.label, CONSENT_LABELS.refuse);
+  });
+
   it('refuses a malformed authorization', async () => {
     const { root } = project();
     for (const authorization of [
@@ -352,7 +432,7 @@ describe('pilot: refusal-first consent', () => {
 
   it('refuses a symlinked root', async () => {
     const real = project();
-    const parent = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'nid-pilot-link-'));
+    const parent = fs.mkdtempSync(nodePath.join(fs.realpathSync(os.tmpdir()), 'nid-pilot-link-'));
     created.push(parent);
     const link = nodePath.join(parent, 'link');
     fs.symlinkSync(real.root, link);
@@ -365,23 +445,57 @@ describe('pilot: refusal-first consent', () => {
     if (result.kind === 'not-inspected') assert.equal(result.reason, 'symlinked-root');
   });
 
-  it('discloses a canonicalised root instead of switching silently', async () => {
-    // On macOS the temp directory is /var/folders/... and resolves to
-    // /private/var/folders/..., which is the benign case this must report.
-    const { root } = project();
-    const result = await runWorkspacePilot({
-      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
-      authorization: authorizationFor(root),
-    });
+  it('refuses when the approved root resolves somewhere else', async () => {
+    // A symlinked ancestor makes the approved path resolve to a different
+    // directory. Reading that directory would be reading something nobody
+    // approved, so it must refuse before listing - not print "Resolved to:".
+    const parent = fs.mkdtempSync(nodePath.join(fs.realpathSync(os.tmpdir()), 'nid-pilot-canon-'));
+    created.push(parent);
+    const real = nodePath.join(parent, 'realdir');
+    fs.mkdirSync(nodePath.join(real, 'project'), { recursive: true });
+    fs.writeFileSync(nodePath.join(real, 'project', 'package.json'), MANIFEST({ 'left-pad': '^1.3.0' }));
+    fs.symlinkSync(real, nodePath.join(parent, 'link'));
 
-    assert.equal(result.kind, 'inspected');
-    if (result.kind !== 'inspected') return;
-    if (result.root.canonicalized) {
-      assert.notEqual(result.root.canonical, result.root.proposed);
-      assert.match(renderWorkspacePilot(result), /Resolved to: .*an ancestor is a symlink/);
-    } else {
-      assert.equal(result.root.canonical, result.root.proposed);
-    }
+    const approved = nodePath.join(parent, 'link', 'project');
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: ui({ typed: approved, answer: CONSENT_LABELS.grant }),
+      authorization: authorizationFor(approved),
+    }));
+
+    assert.equal(result.kind, 'not-inspected');
+    if (result.kind !== 'not-inspected') return;
+    assert.equal(result.reason, 'unexpected-canonical-root');
+    assert.equal(io.lists, 0, 'the root must not be listed');
+    assert.equal(io.opens, 0, 'no candidate may be opened');
+  });
+
+  it('refuses a root replaced with a symlink between consent and resolution', async () => {
+    const real = project();
+    const elsewhere = project({ 'README.md': README });
+    const approved = nodePath.join(nodePath.dirname(real.root), 'swappable');
+    fs.renameSync(real.root, approved);
+
+    // The swap happens while consent is being answered: deterministic, no racing.
+    const swappedUi: ModUi = {
+      input: async () => approved,
+      notify: () => {},
+      select: async () => {
+        fs.rmSync(approved, { recursive: true, force: true });
+        fs.symlinkSync(elsewhere.root, approved);
+        return CONSENT_LABELS.grant;
+      },
+      capabilities: { status: true, surface: true },
+    };
+
+    const { result, io } = await traceIo(() => runWorkspacePilot({
+      ui: swappedUi,
+      authorization: authorizationFor(approved),
+    }));
+
+    assert.equal(result.kind, 'not-inspected');
+    if (result.kind !== 'not-inspected') return;
+    assert.equal(result.reason, 'symlinked-root');
+    assert.equal(io.opens, 0, 'nothing may be opened from the replacement');
   });
 });
 
@@ -535,7 +649,8 @@ describe('pilot: rendering and harness', () => {
     assert.equal(result.caveats.length, PILOT_CAVEATS.length);
     const rendered = renderWorkspacePilot(result);
     assert.match(rendered, /NOT VERIFIED/);
-    assert.match(rendered, /not prevented/);
+    assert.match(rendered, /NOT reliably prevented or detected/);
+    assert.doesNotMatch(rendered, /detected, not prevented/);
   });
 
   it('the harness registers one command and mints its own fixture', async () => {
