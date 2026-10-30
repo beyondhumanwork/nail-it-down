@@ -34,7 +34,7 @@ function tripwireReader(): RepositoryReader & { touches: number } {
     touches: 0,
     list: () => {
       reader.touches += 1;
-      return [];
+      return { kind: 'ok' as const, entries: [] };
     },
     read: () => {
       reader.touches += 1;
@@ -144,7 +144,7 @@ describe('consent: no read happens without a grant', () => {
 
     assert.equal(outcome.kind, 'granted');
     if (isGranted(outcome)) {
-      selectCandidates({ reader: { ...reader, list: () => { reader.touches += 1; return []; } }, consent: { granted: true } });
+      selectCandidates({ reader: { ...reader, list: () => { reader.touches += 1; return { kind: 'ok' as const, entries: [] }; } }, consent: { granted: true } });
     }
     assert.equal(reader.touches, 1, 'a grant is the only path that reaches the reader');
   });

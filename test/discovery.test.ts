@@ -8,12 +8,14 @@ import {
   isSafeDependencyName,
   DEFAULT_BUDGET,
   absenceInBoundedScan,
+  LISTING_FAILURE_FALLBACK,
   containsSecretLikeContent,
   declaredDependencyEvidence,
   inspectCandidatePath,
   redactSecrets,
   reverifyEvidence,
   selectCandidates,
+  toListingFailureReason,
 } from '../src/core/discovery.ts';
 import type {
   ConsentDecision,
@@ -36,10 +38,13 @@ function makeReader(
   if (options.reverse) paths.reverse();
 
   return {
-    list: () => paths.map((path) => overrides[path] ?? {
-      path,
-      kind: 'file',
-      size: typeof contents[path] === 'string' ? utf8(contents[path]).length : (contents[path]?.length ?? 0),
+    list: () => ({
+      kind: 'ok',
+      entries: paths.map((path) => overrides[path] ?? {
+        path,
+        kind: 'file',
+        size: typeof contents[path] === 'string' ? utf8(contents[path]).length : (contents[path]?.length ?? 0),
+      }),
     }),
     read: (path) => {
       if (!(path in contents)) return { kind: 'missing' };
@@ -71,7 +76,7 @@ describe('consent and empty workspaces', () => {
   it('refuses without consent and reads nothing', () => {
     let reads = 0;
     const reader: RepositoryReader = {
-      list: () => [{ path: 'README.md', kind: 'file', size: 5 }],
+      list: () => ({ kind: 'ok', entries: [{ path: 'README.md', kind: 'file', size: 5 }] }),
       read: () => {
         reads += 1;
         return { kind: 'ok', bytes: utf8('hello') };
@@ -385,7 +390,7 @@ describe('encodings and malformed content', () => {
 
   it('reports an unreadable file with a classified, non-echoing detail', () => {
     const reader: RepositoryReader = {
-      list: () => [{ path: 'README.md', kind: 'file', size: 10 }],
+      list: () => ({ kind: 'ok', entries: [{ path: 'README.md', kind: 'file', size: 10 }] }),
       read: () => ({ kind: 'unreadable', reason: 'EACCES: open /home/ahmed/.ssh/id_rsa failed' }),
     };
     const result = selectCandidates({ reader, consent: CONSENT });
@@ -903,7 +908,7 @@ describe('RC-D: diagnostics do not disclose private data', () => {
   it('does not echo reader error text', () => {
     const fakeToken = ['sk', '-', 'e'.repeat(24)].join('');
     const reader: RepositoryReader = {
-      list: () => [{ path: 'package.json', kind: 'file', size: 10 }],
+      list: () => ({ kind: 'ok', entries: [{ path: 'package.json', kind: 'file', size: 10 }] }),
       read: () => ({ kind: 'unreadable', reason: `cannot open /home/ahmed/.aws/credentials ${fakeToken}` }),
     };
     const result = selectCandidates({ reader, consent: CONSENT });
@@ -924,7 +929,7 @@ describe('RC-D: diagnostics do not disclose private data', () => {
     ];
     for (const [reason, expected] of cases) {
       const reader: RepositoryReader = {
-        list: () => [{ path: 'README.md', kind: 'file', size: 1 }],
+        list: () => ({ kind: 'ok', entries: [{ path: 'README.md', kind: 'file', size: 1 }] }),
         read: () => ({ kind: 'unreadable', reason }),
       };
       const result = selectCandidates({ reader, consent: CONSENT });
@@ -981,6 +986,107 @@ describe('purity', () => {
 // than a claim: it pins equivalence on every generated case, so a future edit to
 // the scanner that changes behaviour fails here instead of shipping.
 // ---------------------------------------------------------------------------
+
+describe('listing failures are not emptiness', () => {
+  it('refuses the whole selection when the root cannot be listed, and reads nothing', () => {
+    let reads = 0;
+    const reader: RepositoryReader = {
+      list: () => ({ kind: 'error', reason: 'permission-denied' }),
+      read: () => {
+        reads += 1;
+        return { kind: 'ok', bytes: utf8('secret') };
+      },
+    };
+
+    const result = selectCandidates({ reader, consent: CONSENT });
+    assert.equal(result.kind, 'refused');
+    if (result.kind === 'refused') {
+      assert.equal(result.refusal.reason, 'listing-failed');
+      assert.match(result.refusal.detail, /permission-denied/);
+      // Bounded: the reason is a code, never an OS message or a path.
+      assert.doesNotMatch(result.refusal.detail, /\//);
+    }
+    assert.equal(reads, 0, 'no candidate may be read after a failed listing');
+  });
+
+  it('distinguishes a successfully empty root from a failed listing', () => {
+    const empty = selectCandidates({
+      reader: { list: () => ({ kind: 'ok', entries: [] }), read: () => ({ kind: 'missing' }) },
+      consent: CONSENT,
+    });
+    assert.equal(empty.kind, 'empty', 'a genuinely empty directory is not a refusal');
+
+    const failed = selectCandidates({
+      reader: { list: () => ({ kind: 'error', reason: 'incomplete-enumeration' }), read: () => ({ kind: 'missing' }) },
+      consent: CONSENT,
+    });
+    assert.equal(failed.kind, 'refused');
+  });
+
+  it('never reproduces an off-list listing failure reason', () => {
+    const planted = '/home/ahmed/.ssh/id_rsa ' + ['ghp', '_', 'q'.repeat(28)].join('');
+    const cases: unknown[] = [
+      planted,                       // arbitrary string
+      '',                            // empty
+      42,                            // non-string
+      null,
+      undefined,
+      { toString: () => planted },   // revealing toString
+    ];
+
+    for (const reason of cases) {
+      let reads = 0;
+      const reader = {
+        list: () => ({ kind: 'error', reason }) as never,
+        read: () => {
+          reads += 1;
+          return { kind: 'ok' as const, bytes: utf8('secret') };
+        },
+      };
+      const result = selectCandidates({ reader, consent: CONSENT });
+      const rendered = JSON.stringify(result);
+
+      assert.equal(result.kind, 'refused', `must still refuse for ${String(reason)}`);
+      assert.equal(rendered.includes('id_rsa'), false, 'a path leaked into the result');
+      assert.equal(rendered.includes('qqqq'), false, 'a token leaked into the result');
+      assert.match(rendered, new RegExp(`\\(${LISTING_FAILURE_FALLBACK}\\)`));
+      assert.equal(reads, 0, 'no candidate may be read after a failed listing');
+    }
+  });
+
+  it('keeps every valid listing failure reason identifiable', () => {
+    for (const reason of ['missing', 'not-a-directory', 'permission-denied', 'too-many-open-files', 'root-replaced', 'open-failed', 'incomplete-enumeration', 'unsupported-scope']) {
+      const result = selectCandidates({
+        reader: { list: () => ({ kind: 'error', reason }), read: () => ({ kind: 'missing' }) } as never,
+        consent: CONSENT,
+      });
+      assert.equal(result.kind, 'refused');
+      assert.match(JSON.stringify(result), new RegExp(`\\(${reason}\\)`), `${reason} must stay identifiable`);
+    }
+  });
+
+  it('narrows runtime listing reasons to the closed set', () => {
+    for (const reason of ['missing', 'root-replaced', 'unsupported-scope']) {
+      assert.equal(toListingFailureReason(reason), reason);
+    }
+    for (const bad of ['/etc/passwd', '', 0, false, null, undefined, {}, []]) {
+      assert.equal(toListingFailureReason(bad), LISTING_FAILURE_FALLBACK, `off-list ${String(bad)}`);
+    }
+  });
+
+  it('keeps the enumeration ceiling as a policy refusal, not a listing failure', () => {
+    const entries = Array.from({ length: DEFAULT_BUDGET.maxDirectoryEntries + 1 }, (_, i) => ({
+      path: `file-${i}.txt`,
+      kind: 'other' as const,
+    }));
+    const result = selectCandidates({
+      reader: { list: () => ({ kind: 'ok', entries }), read: () => ({ kind: 'missing' }) },
+      consent: CONSENT,
+    });
+    assert.equal(result.kind, 'refused');
+    if (result.kind === 'refused') assert.equal(result.refusal.reason, 'too-many-directory-entries');
+  });
+});
 
 describe('secrets: base64-like rule matches the expression it replaced', () => {
   const ORACLE = [

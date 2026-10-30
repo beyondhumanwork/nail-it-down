@@ -223,6 +223,69 @@ export type ReaderEntry = {
   target?: string;
 };
 
+/**
+ * Why a directory could not be enumerated.
+ *
+ * A closed set. An OS error message can carry an absolute path or a filename
+ * fragment, so the reason is a code and the caller chooses any human wording.
+ */
+/** The reason used when a reader reports a failure outside the closed set. */
+export const LISTING_FAILURE_FALLBACK = 'open-failed' as const;
+
+export type ListingFailureReason =
+  /** The directory does not exist, or vanished before it could be opened. */
+  | 'missing'
+  /** Something is there, but it is not a directory. */
+  | 'not-a-directory'
+  | 'permission-denied'
+  | 'too-many-open-files'
+  /** The root's identity changed: it is no longer the directory that was validated. */
+  | 'root-replaced'
+  /** The directory could not be opened at all. */
+  | 'open-failed'
+  /** Enumeration started and then failed, so the entry list is incomplete. */
+  | 'incomplete-enumeration'
+  /** This reader only enumerates the workspace root. */
+  | 'unsupported-scope';
+
+const LISTING_FAILURE_REASONS: readonly ListingFailureReason[] = [
+  'missing',
+  'not-a-directory',
+  'permission-denied',
+  'too-many-open-files',
+  'root-replaced',
+  'open-failed',
+  'incomplete-enumeration',
+  'unsupported-scope',
+];
+
+/**
+ * Narrows a runtime failure reason to the closed set.
+ *
+ * The `RepositoryReader` interface is the boundary where a reader this module
+ * did not write - an injected fake, a future adapter, plain JavaScript - can
+ * return any value at all, including an absolute path or a credential fragment.
+ * The reason is about to be written into a message a person reads, so membership
+ * is verified rather than assumed.
+ */
+export function toListingFailureReason(value: unknown): ListingFailureReason {
+  return typeof value === 'string' && (LISTING_FAILURE_REASONS as readonly string[]).includes(value)
+    ? (value as ListingFailureReason)
+    : LISTING_FAILURE_FALLBACK;
+}
+
+/**
+ * The result of a shallow listing.
+ *
+ * A bare array could not distinguish "successfully empty" from "could not be
+ * read", so an unlistable directory looked like a directory with nothing in it —
+ * and "nothing matched" quietly became "nothing is there". The two states are
+ * different facts and now have different types.
+ */
+export type ListResult =
+  | { kind: 'ok'; entries: readonly ReaderEntry[] }
+  | { kind: 'error'; reason: ListingFailureReason };
+
 export type ReadOutcome =
   | { kind: 'ok'; bytes: Uint8Array }
   | { kind: 'missing' }
@@ -234,8 +297,14 @@ export type ReadOutcome =
  * real-host safety, so no test here claims it.
  */
 export type RepositoryReader = {
-  /** Shallow listing of one directory. `''` is the workspace root. */
-  list(relativeDir: string): readonly ReaderEntry[];
+  /**
+   * Shallow listing of one directory. `''` is the workspace root.
+   *
+   * Returns a result rather than an array: a failure must be distinguishable
+   * from an empty directory, because only one of them may ever support a claim
+   * about what is absent.
+   */
+  list(relativeDir: string): ListResult;
   read(relativePath: string): ReadOutcome;
 };
 
@@ -280,6 +349,8 @@ export type RejectionReason =
   | 'too-many-files'
   | 'total-too-large'
   | 'too-many-directory-entries'
+  /** The root could not be enumerated, so nothing may be said about its contents. */
+  | 'listing-failed'
   // policy configuration
   | 'invalid-budget'
   // consent
@@ -663,7 +734,23 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
   }
   const budget = validated.budget;
 
-  const entries = input.reader.list('');
+  const listing = input.reader.list('');
+  if (listing.kind === 'error') {
+    // Fail closed before a single candidate is considered. A directory that
+    // could not be read is not a directory with nothing in it, and no read may
+    // follow a listing that did not complete.
+    return {
+      kind: 'refused',
+      refusal: {
+        reason: 'listing-failed',
+        // Validated, not interpolated: an off-list value would otherwise be
+        // reproduced verbatim in a result a person reads.
+        detail: `the root could not be enumerated (${toListingFailureReason(listing.reason)}),`
+          + ' so nothing is said about its contents',
+      },
+    };
+  }
+  const entries = listing.entries;
 
   if (entries.length > budget.maxDirectoryEntries) {
     return {

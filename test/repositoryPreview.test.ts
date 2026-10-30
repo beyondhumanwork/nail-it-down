@@ -881,10 +881,13 @@ describe('correction D: the aggregate byte ceiling bounds physical reads', () =>
   it('fails closed when a reader hands over more bytes than it listed', () => {
     const calls: string[] = [];
     const lying: RepositoryReader = {
-      list: () => [
-        { path: 'a.md', kind: 'file', size: 100 },
-        { path: 'b.md', kind: 'file', size: 10 },
-      ],
+      list: () => ({
+        kind: 'ok',
+        entries: [
+          { path: 'a.md', kind: 'file', size: 100 },
+          { path: 'b.md', kind: 'file', size: 10 },
+        ],
+      }),
       read: (path) => {
         calls.push(path);
         // The listing claimed 100 bytes; the read returns 200.
@@ -905,7 +908,7 @@ describe('correction D: the aggregate byte ceiling bounds physical reads', () =>
   it('refuses an unsized file when the remaining budget cannot cover the worst case', () => {
     const calls: string[] = [];
     const unsized: RepositoryReader = {
-      list: () => [{ path: 'a.md', kind: 'file', size: 6_000 }],
+      list: () => ({ kind: 'ok', entries: [{ path: 'a.md', kind: 'file', size: 6_000 }] }),
       read: (path) => {
         calls.push(path);
         return { kind: 'ok', bytes: new Uint8Array(6_000) };
