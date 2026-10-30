@@ -28,6 +28,7 @@
  * establish that a mount is local.
  */
 
+import { createHash } from 'node:crypto';
 import * as nodePath from 'node:path';
 
 import type { ModUi } from './modApi.ts';
@@ -100,7 +101,68 @@ export type PilotRefusalReason =
  * the root and reports where it really is, and a target that is not the exact
  * root the authorization named is refused before any candidate is listed.
  */
-export type PilotRootRejection = RootRejection | 'unexpected-canonical-root';
+export type PilotRootRejection =
+  | RootRejection
+  | 'unexpected-canonical-root'
+  /** The caller's pre-read gate refused, so no candidate was opened. */
+  | 'pre-read-check-failed';
+
+/**
+ * Why a pre-read gate refused. A closed set, because a free-text reason from a
+ * caller could carry a path or an OS message into the UI.
+ */
+export const PRE_READ_REFUSALS = [
+  'root-path-mismatch',
+  'root-not-directory',
+  'root-symlinked',
+  'root-owner-mismatch',
+  'mount-unverifiable',
+  'mount-not-acceptable',
+  'root-is-a-mount-point',
+] as const;
+
+export type PreReadRefusal = (typeof PRE_READ_REFUSALS)[number];
+
+/** The reason shown when a gate returns something that is not on the list. */
+export const PRE_READ_FALLBACK: PreReadRefusal = 'mount-unverifiable';
+
+/**
+ * Narrows a runtime value to the closed set.
+ *
+ * The type says `PreReadRefusal`, but a type is not a runtime check: a mod, a
+ * test using `as never`, or plain JavaScript can hand back anything at all. The
+ * value is about to be written into a message a person reads, so membership is
+ * verified rather than assumed - otherwise an arbitrary string, including a path
+ * or a credential fragment, would be reproduced in the UI by the very code that
+ * promises to sanitise its output.
+ */
+export function toPreReadRefusal(value: unknown): PreReadRefusal {
+  return typeof value === 'string' && (PRE_READ_REFUSALS as readonly string[]).includes(value)
+    ? (value as PreReadRefusal)
+    : PRE_READ_FALLBACK;
+}
+
+export type PreReadDecision =
+  | { ok: true }
+  | { ok: false; reason: PreReadRefusal };
+
+/**
+ * A read file plus a digest of exactly the text this invocation obtained.
+ *
+ * M2 Slice 3B3 needs to prove that the files it cites are the files it expected,
+ * and the one-time canary budget forbids reading them a second time to do it.
+ * Hashing the text already in hand keeps the check inside the budget and adds no
+ * filesystem work.
+ *
+ * The digest is over the decoded UTF-8 text, which re-encodes to the original
+ * bytes for any valid UTF-8 file. The single exception is a leading byte-order
+ * mark: `TextDecoder` strips it, so a BOM-prefixed file would digest without it.
+ * The preparation fixture has no BOM; a canary comparing against a raw
+ * `sha256sum` would fail closed rather than silently match.
+ */
+export type PilotFileSummary = PreviewFileSummary & {
+  sha256: string;
+};
 
 export type PilotRoot = {
   /** Exactly what the person supplied, lexically resolved. Shown before any read. */
@@ -118,7 +180,7 @@ export type PilotResult =
   | {
     kind: 'inspected';
     root: PilotRoot;
-    files: PreviewFileSummary[];
+    files: PilotFileSummary[];
     skipped: PreviewSkipped[];
     declarations: PreviewDeclaration[];
     evidenceGap?: string;
@@ -216,6 +278,20 @@ function refusal(reason: PilotRefusalReason, shownRoot: string): PilotResult {
 export async function runWorkspacePilot(input: {
   ui: ModUi | undefined;
   authorization: PilotAuthorization;
+  /**
+   * Optional gate that runs after the native grant and after the root has been
+   * validated and resolved, but **before any candidate file is opened**.
+   *
+   * It exists so a caller can require conditions the reader does not itself
+   * check - ownership, mount provenance - without those conditions becoming a
+   * claim about content that was already read. It can only refuse: there is no
+   * return value that widens what may be read, and it is given the already
+   * validated root rather than a root of its choosing.
+   *
+   * Absent, the pilot behaves exactly as before. Throwing, or returning
+   * anything other than `{ok: true}`, refuses.
+   */
+  beforeRead?: (root: PilotRoot) => PreReadDecision;
 }): Promise<PilotResult> {
   const authorizedRoot = authorizedRootOf(input.authorization);
 
@@ -280,6 +356,30 @@ export async function runWorkspacePilot(input: {
 
   const root: PilotRoot = { proposed: proposal.root, canonical: opened.canonicalRoot };
 
+  // Fail-closed pre-read gate. Everything above this point is dialogs and root
+  // metadata; nothing has opened a candidate file, and nothing will if the gate
+  // refuses or misbehaves.
+  if (input.beforeRead !== undefined) {
+    let decision: PreReadDecision;
+    try {
+      decision = input.beforeRead(root);
+    } catch {
+      // A gate that cannot answer has not approved anything.
+      decision = { ok: false, reason: PRE_READ_FALLBACK };
+    }
+    if (decision?.ok !== true) {
+      // Validated, not interpolated: an off-list value would otherwise be
+      // reproduced verbatim in front of the person being refused.
+      const reason = toPreReadRefusal(decision?.reason);
+      return {
+        kind: 'not-inspected',
+        reason: 'pre-read-check-failed',
+        detail: `required preconditions were not met (${reason}), so no file was read`,
+        disclosure,
+      };
+    }
+  }
+
   // 5. Reuse the Slice 3A snapshot: one listing and one read per path, with the
   //    aggregate ceiling enforced before a file is opened.
   const ceilingRefused = new Set<string>();
@@ -295,11 +395,13 @@ export async function runWorkspacePilot(input: {
     return { kind: 'nothing-to-read', detail: selection.detail, disclosure };
   }
 
-  const files: PreviewFileSummary[] = selection.files.map((file) => ({
+  const files: PilotFileSummary[] = selection.files.map((file) => ({
     path: file.path,
     kind: file.kind,
     lines: file.lines,
     bytes: file.bytes,
+    // Computed from the text already read: no second open, no extra bytes.
+    sha256: createHash('sha256').update(file.text, 'utf8').digest('hex'),
   }));
   const skipped: PreviewSkipped[] = selection.rejected.map((entry) => ({
     path: entry.path,
