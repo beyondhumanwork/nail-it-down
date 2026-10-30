@@ -106,12 +106,23 @@ function fixtureRootOf(authorization: FixtureAuthorization | undefined): string 
  * citations again. A second formatter would be a second place for a citation to
  * be shown when it should not be.
  */
-function messageFor(result: PilotResult): string {
-  const body = renderWorkspacePilot(result);
-  // The host-persistence note is appended to every outcome, including refusals,
-  // because a person being told "nothing was read" still deserves to know what
-  // the host itself keeps.
+/**
+ * Appends the host-persistence note to any message.
+ *
+ * Every outcome goes through here - including the two that never reach the
+ * pilot. A person being told "nothing was read" still deserves to know what the
+ * host keeps, and an early return that skips this is a silent gap in the one
+ * disclosure this module exists to make.
+ */
+function withHostPersistenceNote(body: string): string {
   return `${body}\n\nHost persistence: ${PILOT_PERSISTENCE_STATEMENT}`;
+}
+
+function messageFor(result: PilotResult): string {
+  // Re-uses `renderWorkspacePilot` rather than formatting citations again: a
+  // second formatter would be a second place for a citation to be shown when it
+  // should not be.
+  return withHostPersistenceNote(renderWorkspacePilot(result));
 }
 
 /**
@@ -144,14 +155,18 @@ export async function offerRepositoryContext(input: {
     return {
       kind: 'idea-only',
       reason: 'no-ui',
-      message: 'Repository context was not offered: this host has no dialog surface, so nothing was read.',
+      message: withHostPersistenceNote(
+        'Repository context was not offered: this host has no dialog surface, so nothing was read.',
+      ),
     };
   }
   if (fixtureRoot === undefined) {
     return {
       kind: 'idea-only',
       reason: 'authorization-invalid',
-      message: 'Repository context was not offered: no valid fixture authorization was supplied, so nothing was read.',
+      message: withHostPersistenceNote(
+        'Repository context was not offered: no valid fixture authorization was supplied, so nothing was read.',
+      ),
     };
   }
 

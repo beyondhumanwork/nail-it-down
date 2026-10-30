@@ -451,19 +451,58 @@ describe('adapter: nothing leaves the local feed', () => {
     }
   });
 
-  it('discloses host persistence on every outcome, including refusals', async () => {
+  it('discloses host persistence on every outcome, including the earliest refusals', async () => {
     const { root } = fixture();
-    const granted = await offerRepositoryContext({
-      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
-      authorization: auth(root),
-    });
-    const refused = await offerRepositoryContext({
-      ui: ui({ typed: root, answer: CONSENT_LABELS.refuse }),
-      authorization: auth(root),
-    });
 
-    assert.ok(granted.message.includes(PILOT_PERSISTENCE_STATEMENT));
-    assert.ok(refused.message.includes(PILOT_PERSISTENCE_STATEMENT), 'a refusal still owes the disclosure');
+    // Every path this function can take, including the two that never reach the
+    // pilot. An early return that skipped the note was the defect this covers.
+    const outcomes = await Promise.all([
+      offerRepositoryContext({ ui: undefined, authorization: auth(root) }),
+      offerRepositoryContext({
+        ui: { select: async () => CONSENT_LABELS.grant, capabilities: { status: true, surface: true } } as ModUi,
+        authorization: auth(root),
+      }),
+      offerRepositoryContext({ ui: ui({ typed: root }), authorization: undefined }),
+      offerRepositoryContext({ ui: ui({ typed: root }), authorization: { fixtureRoot: 'relative', issuedBy: 'x' } as FixtureAuthorization }),
+      offerRepositoryContext({ ui: ui({ typed: root }), authorization: { fixtureRoot: root, issuedBy: '  ' } as FixtureAuthorization }),
+      offerRepositoryContext({ ui: ui({ typed: root, answer: CONSENT_LABELS.refuse }), authorization: auth(root) }),
+      offerRepositoryContext({ ui: ui({ typed: root, answer: CONSENT_LABELS.grant }), authorization: auth(root) }),
+    ]);
+
+    assert.equal(outcomes.length, 7);
+    for (const outcome of outcomes) {
+      assert.ok(
+        outcome.message.includes(PILOT_PERSISTENCE_STATEMENT),
+        `every outcome must carry the note; this one did not (${outcome.kind})`,
+      );
+      assert.match(outcome.message, /Host persistence: /);
+    }
+  });
+
+  it('keeps the zero-operation guarantee while adding the note to early refusals', async () => {
+    const { root } = fixture();
+
+    // no-ui: nothing may be touched, and the note must still be present.
+    const noUi = await traceIo(() => offerRepositoryContext({ ui: undefined, authorization: auth(root) }));
+    assert.equal(noUi.result.kind, 'idea-only');
+    if (noUi.result.kind === 'idea-only') assert.equal(noUi.result.reason, 'no-ui');
+    assert.ok(noUi.result.message.includes(PILOT_PERSISTENCE_STATEMENT));
+    assert.deepEqual(noUi.io.paths, [], 'adding the note must not introduce filesystem access');
+
+    // authorization-invalid: same.
+    const badAuth = await traceIo(() => offerRepositoryContext({
+      ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+      authorization: undefined,
+    }));
+    assert.equal(badAuth.result.kind, 'idea-only');
+    if (badAuth.result.kind === 'idea-only') assert.equal(badAuth.result.reason, 'authorization-invalid');
+    assert.ok(badAuth.result.message.includes(PILOT_PERSISTENCE_STATEMENT));
+    assert.deepEqual(badAuth.io.paths, [], 'a malformed authorization must still touch nothing');
+
+    // And the host must not have been prompted for either.
+    const events: string[] = [];
+    await offerRepositoryContext({ ui: ui({ typed: root, events }), authorization: undefined });
+    assert.deepEqual(events, [], 'an invalid authorization must not reach a dialog');
   });
 });
 
