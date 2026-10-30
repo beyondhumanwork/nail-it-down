@@ -8,12 +8,14 @@ import {
   isSafeDependencyName,
   DEFAULT_BUDGET,
   absenceInBoundedScan,
+  LISTING_FAILURE_FALLBACK,
   containsSecretLikeContent,
   declaredDependencyEvidence,
   inspectCandidatePath,
   redactSecrets,
   reverifyEvidence,
   selectCandidates,
+  toListingFailureReason,
 } from '../src/core/discovery.ts';
 import type {
   ConsentDecision,
@@ -1019,6 +1021,57 @@ describe('listing failures are not emptiness', () => {
       consent: CONSENT,
     });
     assert.equal(failed.kind, 'refused');
+  });
+
+  it('never reproduces an off-list listing failure reason', () => {
+    const planted = '/home/ahmed/.ssh/id_rsa ' + ['ghp', '_', 'q'.repeat(28)].join('');
+    const cases: unknown[] = [
+      planted,                       // arbitrary string
+      '',                            // empty
+      42,                            // non-string
+      null,
+      undefined,
+      { toString: () => planted },   // revealing toString
+    ];
+
+    for (const reason of cases) {
+      let reads = 0;
+      const reader = {
+        list: () => ({ kind: 'error', reason }) as never,
+        read: () => {
+          reads += 1;
+          return { kind: 'ok' as const, bytes: utf8('secret') };
+        },
+      };
+      const result = selectCandidates({ reader, consent: CONSENT });
+      const rendered = JSON.stringify(result);
+
+      assert.equal(result.kind, 'refused', `must still refuse for ${String(reason)}`);
+      assert.equal(rendered.includes('id_rsa'), false, 'a path leaked into the result');
+      assert.equal(rendered.includes('qqqq'), false, 'a token leaked into the result');
+      assert.match(rendered, new RegExp(`\\(${LISTING_FAILURE_FALLBACK}\\)`));
+      assert.equal(reads, 0, 'no candidate may be read after a failed listing');
+    }
+  });
+
+  it('keeps every valid listing failure reason identifiable', () => {
+    for (const reason of ['missing', 'not-a-directory', 'permission-denied', 'too-many-open-files', 'root-replaced', 'open-failed', 'incomplete-enumeration', 'unsupported-scope']) {
+      const result = selectCandidates({
+        reader: { list: () => ({ kind: 'error', reason }), read: () => ({ kind: 'missing' }) } as never,
+        consent: CONSENT,
+      });
+      assert.equal(result.kind, 'refused');
+      assert.match(JSON.stringify(result), new RegExp(`\\(${reason}\\)`), `${reason} must stay identifiable`);
+    }
+  });
+
+  it('narrows runtime listing reasons to the closed set', () => {
+    for (const reason of ['missing', 'root-replaced', 'unsupported-scope']) {
+      assert.equal(toListingFailureReason(reason), reason);
+    }
+    for (const bad of ['/etc/passwd', '', 0, false, null, undefined, {}, []]) {
+      assert.equal(toListingFailureReason(bad), LISTING_FAILURE_FALLBACK, `off-list ${String(bad)}`);
+    }
   });
 
   it('keeps the enumeration ceiling as a policy refusal, not a listing failure', () => {

@@ -229,6 +229,9 @@ export type ReaderEntry = {
  * A closed set. An OS error message can carry an absolute path or a filename
  * fragment, so the reason is a code and the caller chooses any human wording.
  */
+/** The reason used when a reader reports a failure outside the closed set. */
+export const LISTING_FAILURE_FALLBACK = 'open-failed' as const;
+
 export type ListingFailureReason =
   /** The directory does not exist, or vanished before it could be opened. */
   | 'missing'
@@ -244,6 +247,32 @@ export type ListingFailureReason =
   | 'incomplete-enumeration'
   /** This reader only enumerates the workspace root. */
   | 'unsupported-scope';
+
+const LISTING_FAILURE_REASONS: readonly ListingFailureReason[] = [
+  'missing',
+  'not-a-directory',
+  'permission-denied',
+  'too-many-open-files',
+  'root-replaced',
+  'open-failed',
+  'incomplete-enumeration',
+  'unsupported-scope',
+];
+
+/**
+ * Narrows a runtime failure reason to the closed set.
+ *
+ * The `RepositoryReader` interface is the boundary where a reader this module
+ * did not write - an injected fake, a future adapter, plain JavaScript - can
+ * return any value at all, including an absolute path or a credential fragment.
+ * The reason is about to be written into a message a person reads, so membership
+ * is verified rather than assumed.
+ */
+export function toListingFailureReason(value: unknown): ListingFailureReason {
+  return typeof value === 'string' && (LISTING_FAILURE_REASONS as readonly string[]).includes(value)
+    ? (value as ListingFailureReason)
+    : LISTING_FAILURE_FALLBACK;
+}
 
 /**
  * The result of a shallow listing.
@@ -714,7 +743,10 @@ export function selectCandidates(input: SelectionInput): SelectionResult {
       kind: 'refused',
       refusal: {
         reason: 'listing-failed',
-        detail: `the root could not be enumerated (${listing.reason}), so nothing is said about its contents`,
+        // Validated, not interpolated: an off-list value would otherwise be
+        // reproduced verbatim in a result a person reads.
+        detail: `the root could not be enumerated (${toListingFailureReason(listing.reason)}),`
+          + ' so nothing is said about its contents',
       },
     };
   }
