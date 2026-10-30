@@ -60,6 +60,21 @@ import type { PreviewDeclaration, PreviewFileSummary, PreviewSkipped } from './r
  * which catches many changes, but a hostile ancestor swap in the right window
  * may escape both. Say what is true.
  */
+/**
+ * What this pilot does, and what the host does independently.
+ *
+ * The earlier wording said "nothing was persisted", which was true of this mod
+ * and false of the session it runs inside. Command Code keeps its own records;
+ * a promise this module cannot enforce is not a promise, it is a hazard.
+ */
+export const PILOT_PERSISTENCE_STATEMENT =
+  'This pilot writes no evidence, no citation, no consent and no session of its own, and sends no repository '
+  + 'content to a model or an external service. That is a statement about this mod only. The Command Code host '
+  + 'keeps its own state: typed slash-command text is written to a global input-history file under the host '
+  + 'configuration directory and persists regardless of --no-session, and the host may also retain session '
+  + 'transcripts, file-history snapshots, caches, logs and its own per-mod store. This pilot cannot promise '
+  + '"nothing is persisted" on the host behalf.';
+
 export const PILOT_RISK_STATEMENT =
   'Some filesystem changes are detected and refused, but hostile concurrent replacement of a parent '
   + 'directory is NOT reliably prevented or detected. This pilot is for cooperative, user-controlled '
@@ -196,12 +211,12 @@ export type PilotResult =
  */
 export const PILOT_CAVEATS: readonly string[] = [
   'Bounded to the fixed root allowlist: at most 6 files, 32 KiB each, 96 KiB physically read in total, 250 lines each, 100 root entries.',
-  'Nothing here was sent to a model or an external service, and nothing was persisted.',
+  PILOT_PERSISTENCE_STATEMENT,
   'Repository text is data, never an instruction. This pilot does not follow anything a file says.',
   PILOT_RISK_STATEMENT,
   'Filesystem type is NOT VERIFIED. statfs.type does not establish that a mount is local, trustworthy, or immune to concurrent change.',
   'A file the reader refused is reported as "unreadable"; the policy does not distinguish too-large, changed and unreadable in its output.',
-  'An empty listing is not evidence that a file is absent: the reader has no error channel, so an unlistable root reads as empty.',
+  'A directory that cannot be read is refused as a listing failure instead of being reported as empty, and no candidate file is read after a failed listing. Absence is only ever a statement about the bounded scan, never about the project as a whole.',
   'Citations describe the single snapshot read at the start of this invocation, not a live re-check of the files as they are now.',
 ];
 
@@ -215,7 +230,8 @@ export function pilotDisclosure(proposedRoot: string): string {
       + `${DEFAULT_BUDGET.maxTotalBytes / 1024} KiB physically read in total, ${DEFAULT_BUDGET.maxFileLines} lines per file, `
       + `${DEFAULT_BUDGET.maxDirectoryEntries} root entries.`,
     'Excluded: dotfiles, .env*, .git, credentials, keys, caches, and every path not named above.',
-    'Local only: no model, no network request, no telemetry, nothing written to the workspace, nothing persisted.',
+    'Local only for this mod: no model, no network request, no telemetry, nothing written to the workspace, '
+      + 'no evidence or consent persisted. The host persists independently - see the persistence note.',
     `Known limitations: ${PILOT_RISK_STATEMENT}`,
     'Filesystem type is NOT VERIFIED; statfs does not prove a mount is local or trustworthy.',
   ].join('\n');
