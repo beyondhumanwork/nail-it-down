@@ -38,7 +38,7 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep as nodePathSep } from 'node:path';
 
 import type { ModUi } from './modApi.ts';
 import { offerRepositoryContext, hasVerifiedEvidence } from './offerRepositoryContext.ts';
@@ -74,11 +74,71 @@ export type SyntheticWorkspace = {
 };
 
 /**
+ * A rejected fixture filename. A closed set, so a caller gets a reason rather
+ * than a bare throw.
+ */
+export type UnsafeFilenameReason =
+  /** Empty, or whitespace only. */
+  | 'empty'
+  /** `.` or `..` - the entry names that mean "here" and "the parent". */
+  | 'self-or-parent'
+  /** Contains `/` or `\`, so it names a path rather than a file. */
+  | 'path-separator'
+  /** Absolute on POSIX, Windows-drive, or UNC. */
+  | 'absolute'
+  /** Starts with `~`, which some callers expand. */
+  | 'home-relative'
+  /** A leading `.` would create a dotfile, which the reader's policy excludes anyway. */
+  | 'dotfile'
+  /** Embedded NUL or other control character. */
+  | 'control-character';
+
+export type FilenameCheck =
+  | { ok: true }
+  | { ok: false; name: string; reason: UnsafeFilenameReason };
+
+/**
+ * Validates one fixture filename as a plain root-level basename.
+ *
+ * Why this exists: `mintWorkspace` does `writeFileSync(join(root, name), ...)`,
+ * and `join` resolves `..` - so `'../outside.txt'` wrote to the parent and
+ * `'../../escape.txt'` wrote outside the disposable directory that `dispose()`
+ * cleans up. A helper whose whole promise is "this is a contained synthetic
+ * fixture" must not be able to write outside its own fixture.
+ *
+ * The rule is deliberately structural rather than an allowlist of the names the
+ * tests happen to use: a fixture is allowed to invent `unrelated.txt`, and an
+ * allowlist would merely move the trap. What is forbidden is anything that names
+ * a location instead of a file in the current directory.
+ */
+export function checkFixtureFilename(name: unknown): FilenameCheck {
+  if (typeof name !== 'string') return { ok: false, name: String(name), reason: 'empty' };
+  if (name.trim() === '') return { ok: false, name, reason: 'empty' };
+  if (name === '.' || name === '..') return { ok: false, name, reason: 'self-or-parent' };
+  if (name.includes('/') || name.includes('\\')) return { ok: false, name, reason: 'path-separator' };
+  // A POSIX-absolute name is already caught by the separator check above, since
+  // it necessarily starts with `/`. The drive and UNC shapes are *not*: they are
+  // absolute without containing a character the separator check looks for.
+  if (/^[A-Za-z]:/.test(name) || name.startsWith('\\\\')) return { ok: false, name, reason: 'absolute' };
+  if (name.startsWith('~')) return { ok: false, name, reason: 'home-relative' };
+  if (name.startsWith('.')) return { ok: false, name, reason: 'dotfile' };
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(name)) return { ok: false, name, reason: 'control-character' };
+  return { ok: true };
+}
+
+/**
  * Mints one disposable workspace under the canonical temp root.
  *
  * Canonical, not `os.tmpdir()`, because macOS resolves the latter through a
  * `/var` symlink and the pilot refuses a root that resolves elsewhere - which is
  * the correct behaviour, so the fixture is born canonical instead of excused.
+ *
+ * Every filename is validated **before anything is created**, so a rejected name
+ * leaves no directory behind and cannot have written a byte. The validated
+ * result is then re-checked against the resolved root as a second line of
+ * defence: if `join` ever produced something outside the fixture, the mint
+ * refuses rather than proceeding.
  */
 export function mintWorkspace(
   files: Record<string, string> = {
@@ -87,10 +147,39 @@ export function mintWorkspace(
     'package.json': MANIFEST({ 'left-pad': '^1.3.0', 'tiny-invariant': '^1.3.1' }),
   },
 ): SyntheticWorkspace {
+  // 1. Validate every name first. Nothing is created until all of them pass.
+  const entries = Object.entries(files);
+  for (const [name] of entries) {
+    const checked = checkFixtureFilename(name);
+    if (!checked.ok) {
+      throw new Error(`fixture filename ${JSON.stringify(name)} is not allowed (${checked.reason})`);
+    }
+  }
+
   const parent = mkdtempSync(join(realpathSync(tmpdir()), 'nid-5c-'));
   const root = join(parent, 'project');
   mkdirSync(root);
-  for (const [name, content] of Object.entries(files)) writeFileSync(join(root, name), content);
+
+  try {
+    for (const [name, content] of entries) {
+      const target = join(root, name);
+      // 2. Belt and braces: the resolved target must still be a direct child.
+      if (!target.startsWith(`${root}${nodePathSep}`)) {
+        throw new Error(`fixture filename ${JSON.stringify(name)} resolved outside the fixture`);
+      }
+      writeFileSync(target, content);
+    }
+  } catch (error) {
+    // Remove the partial fixture rather than leaving it for `dispose()` that the
+    // caller never received.
+    try {
+      rmSync(parent, { recursive: true, force: true });
+    } catch {
+      // Disposable; nothing depends on the removal succeeding.
+    }
+    throw error;
+  }
+
   return {
     parent,
     root,
