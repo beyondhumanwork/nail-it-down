@@ -192,7 +192,10 @@ describe('pilot: disclosure before consent', () => {
     assert.match(disclosure, new RegExp(`${DEFAULT_BUDGET.maxDirectoryEntries} root entries`));
     assert.match(disclosure, /\.env\*/);
     assert.match(disclosure, /no model, no network request/i);
-    assert.match(disclosure, /nothing persisted/i);
+    // Corrected in M2-5B: the pilot's own persistence is scoped, and the host's
+    // independent state is named rather than denied.
+    assert.match(disclosure, /host persists independently/i);
+    assert.doesNotMatch(disclosure, /nothing persisted/i);
     // The claims that must never be softened, and must not overstate either.
     assert.match(disclosure, /Some filesystem changes are detected and refused/);
     assert.match(disclosure, /NOT reliably prevented or detected/);
