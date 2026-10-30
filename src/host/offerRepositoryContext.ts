@@ -35,12 +35,9 @@
 import * as nodePath from 'node:path';
 
 import type { ModUi } from './modApi.ts';
-import {
-  PILOT_PERSISTENCE_STATEMENT,
-  renderWorkspacePilot,
-  runWorkspacePilot,
-} from './workspacePilot.ts';
+import { PILOT_PERSISTENCE_STATEMENT, renderWorkspacePilot, runWorkspacePilot } from './workspacePilot.ts';
 import type { PilotResult } from './workspacePilot.ts';
+import type { PreviewDeclaration } from './repositoryPreview.ts';
 
 /**
  * What the caller must produce to authorize anything.
@@ -79,15 +76,68 @@ export type RepositoryContextOutcome =
     message: string;
   }
   /**
-   * Something was read. `message` may contain citations; it contains none when
-   * the pilot's own verification did not pass.
+   * Files were read. `evidence` says what, if anything, may be cited.
+   *
+   * A successful read is not a verified claim: a project can be read perfectly
+   * and still declare nothing this policy can cite. Those are different facts
+   * and the caller must be able to tell them apart without reading prose.
    */
   | {
     kind: 'inspected';
     message: string;
-    /** False when a refusal inside the pilot means no evidence may be shown. */
-    hasEvidence: boolean;
+    /** How many files were read. Never conflated with evidence. */
+    filesRead: number;
+    /** How many of those were refused, stale, or otherwise unusable. */
+    filesRejected: number;
+    /** The citation-backed claims, empty when none survived verification. */
+    evidence: readonly VerifiedEvidence[];
   };
+
+/**
+ * A claim this invocation can actually support.
+ *
+ * `provenance` is not decorative: it is the reason a claim may be shown. Only a
+ * `verified` declaration is evidence. A `stale` or `missing` one describes a
+ * fact that could not be re-established, and rendering it as evidence would be
+ * an assertion the reader never made.
+ */
+export type VerifiedEvidence = {
+  claim: string;
+  path: string;
+  lineStart: number;
+  lineEnd: number;
+  excerpt: string;
+  provenance: 'verified';
+};
+
+/**
+ * The declarations this outcome may be cited for.
+ *
+ * Exported so the rule it encodes is testable on fabricated input: a
+ * declaration is evidence only when its provenance is `verified` *and* it names
+ * the span it came from. Anything else is dropped rather than downgraded -
+ * showing a stale claim with a caveat is still showing a claim.
+ */
+export function verifiedEvidenceOf(
+  declarations: readonly PreviewDeclaration[],
+): VerifiedEvidence[] {
+  const verified: VerifiedEvidence[] = [];
+  for (const declaration of declarations) {
+    if (declaration.provenance !== 'verified') continue;
+    if (declaration.path === '' || declaration.claim === '') continue;
+    if (!Number.isInteger(declaration.lineStart) || declaration.lineStart < 1) continue;
+    if (!Number.isInteger(declaration.lineEnd) || declaration.lineEnd < declaration.lineStart) continue;
+    verified.push({
+      claim: declaration.claim,
+      path: declaration.path,
+      lineStart: declaration.lineStart,
+      lineEnd: declaration.lineEnd,
+      excerpt: declaration.excerpt,
+      provenance: 'verified',
+    });
+  }
+  return verified;
+}
 
 /** Narrow a caller's authorization to a resolved root, or `undefined`. */
 function fixtureRootOf(authorization: FixtureAuthorization | undefined): string | undefined {
@@ -151,7 +201,13 @@ export async function offerRepositoryContext(input: {
 }): Promise<RepositoryContextOutcome> {
   const fixtureRoot = fixtureRootOf(input.authorization);
 
-  if (input.ui === undefined || typeof input.ui.select !== 'function') {
+  // Both dialogs are required: a host that could ask for consent but not for a
+  // root would reach the pilot and fail there with a less accurate reason. Ask
+  // the precise question here instead - "can this host hold this conversation at
+  // all?" - so the caller gets `no-ui` rather than a pilot-specific code.
+  if (input.ui === undefined
+    || typeof input.ui.select !== 'function'
+    || typeof input.ui.input !== 'function') {
     return {
       kind: 'idea-only',
       reason: 'no-ui',
@@ -187,7 +243,27 @@ export async function offerRepositoryContext(input: {
     return { kind: 'idea-only', reason, message: messageFor(result) };
   }
 
-  return { kind: 'inspected', message: messageFor(result), hasEvidence: true };
+  const evidence = verifiedEvidenceOf(result.declarations);
+
+  return {
+    kind: 'inspected',
+    message: messageFor(result),
+    filesRead: result.files.length,
+    filesRejected: result.skipped.length,
+    evidence,
+  };
+}
+
+/**
+ * True only when this outcome carries at least one verified, citable claim.
+ *
+ * Deliberately a function over the outcome rather than a stored boolean: the old
+ * `hasEvidence` field was set from `kind === 'inspected'`, which is true for any
+ * completed read including one that found nothing to cite. Callers that want the
+ * boolean should ask this, and the name says what it counts.
+ */
+export function hasVerifiedEvidence(outcome: RepositoryContextOutcome): boolean {
+  return outcome.kind === 'inspected' && outcome.evidence.length > 0;
 }
 
 /**
