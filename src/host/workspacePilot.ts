@@ -111,14 +111,36 @@ export type PilotRootRejection =
  * Why a pre-read gate refused. A closed set, because a free-text reason from a
  * caller could carry a path or an OS message into the UI.
  */
-export type PreReadRefusal =
-  | 'root-path-mismatch'
-  | 'root-not-directory'
-  | 'root-symlinked'
-  | 'root-owner-mismatch'
-  | 'mount-unverifiable'
-  | 'mount-not-acceptable'
-  | 'root-is-a-mount-point';
+export const PRE_READ_REFUSALS = [
+  'root-path-mismatch',
+  'root-not-directory',
+  'root-symlinked',
+  'root-owner-mismatch',
+  'mount-unverifiable',
+  'mount-not-acceptable',
+  'root-is-a-mount-point',
+] as const;
+
+export type PreReadRefusal = (typeof PRE_READ_REFUSALS)[number];
+
+/** The reason shown when a gate returns something that is not on the list. */
+export const PRE_READ_FALLBACK: PreReadRefusal = 'mount-unverifiable';
+
+/**
+ * Narrows a runtime value to the closed set.
+ *
+ * The type says `PreReadRefusal`, but a type is not a runtime check: a mod, a
+ * test using `as never`, or plain JavaScript can hand back anything at all. The
+ * value is about to be written into a message a person reads, so membership is
+ * verified rather than assumed - otherwise an arbitrary string, including a path
+ * or a credential fragment, would be reproduced in the UI by the very code that
+ * promises to sanitise its output.
+ */
+export function toPreReadRefusal(value: unknown): PreReadRefusal {
+  return typeof value === 'string' && (PRE_READ_REFUSALS as readonly string[]).includes(value)
+    ? (value as PreReadRefusal)
+    : PRE_READ_FALLBACK;
+}
 
 export type PreReadDecision =
   | { ok: true }
@@ -343,13 +365,16 @@ export async function runWorkspacePilot(input: {
       decision = input.beforeRead(root);
     } catch {
       // A gate that cannot answer has not approved anything.
-      decision = { ok: false, reason: 'mount-unverifiable' };
+      decision = { ok: false, reason: PRE_READ_FALLBACK };
     }
     if (decision?.ok !== true) {
+      // Validated, not interpolated: an off-list value would otherwise be
+      // reproduced verbatim in front of the person being refused.
+      const reason = toPreReadRefusal(decision?.reason);
       return {
         kind: 'not-inspected',
         reason: 'pre-read-check-failed',
-        detail: `required preconditions were not met (${decision?.reason ?? 'mount-unverifiable'}), so no file was read`,
+        detail: `required preconditions were not met (${reason}), so no file was read`,
         disclosure,
       };
     }

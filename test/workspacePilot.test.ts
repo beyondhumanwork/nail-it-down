@@ -11,6 +11,9 @@ import {
   PILOT_INPUT_PLACEHOLDER,
   PILOT_INPUT_TITLE,
   PILOT_RISK_STATEMENT,
+  PRE_READ_FALLBACK,
+  PRE_READ_REFUSALS,
+  toPreReadRefusal,
   pilotDisclosure,
   proposeWorkspaceRoot,
   renderWorkspacePilot,
@@ -712,6 +715,64 @@ describe('pilot: bounded reading and honest evidence', () => {
       assert.equal(result.kind, 'not-inspected');
       if (result.kind === 'not-inspected') assert.equal(result.reason, 'pre-read-check-failed');
       assert.equal(io.opens, 0);
+    }
+  });
+
+  it('keeps every valid refusal code identifiable', async () => {
+    const { root } = project();
+    for (const reason of PRE_READ_REFUSALS) {
+      const { result } = await traceIo(() => runWorkspacePilot({
+        ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+        authorization: authorizationFor(root),
+        beforeRead: () => ({ ok: false, reason }),
+      }));
+      assert.equal(result.kind, 'not-inspected');
+      if (result.kind === 'not-inspected') {
+        assert.equal(result.reason, 'pre-read-check-failed');
+        assert.match(result.detail, new RegExp(`\\(${reason}\\)`), `${reason} must stay identifiable`);
+      }
+    }
+  });
+
+  it('never reproduces an off-list refusal reason', async () => {
+    const { root } = project();
+    const planted = '/home/ahmed/.ssh/id_rsa and a token ' + ['sk', '-', 'z'.repeat(24)].join('');
+    const cases: unknown[] = [
+      planted,                                  // arbitrary string
+      '',                                       // empty string
+      42,                                       // non-string
+      null,                                     // null
+      undefined,                                // absent
+      { toString: () => planted },              // object with a revealing toString
+      ['root-symlinked'],                       // array
+    ];
+
+    for (const reason of cases) {
+      const { result, io } = await traceIo(() => runWorkspacePilot({
+        ui: ui({ typed: root, answer: CONSENT_LABELS.grant }),
+        authorization: authorizationFor(root),
+        beforeRead: () => ({ ok: false, reason }) as never,
+      }));
+
+      const rendered = JSON.stringify(result);
+      assert.equal(rendered.includes('id_rsa'), false, `a path leaked for ${String(reason)}`);
+      assert.equal(rendered.includes('zzzz'), false, `a token leaked for ${String(reason)}`);
+      assert.match(
+        rendered,
+        new RegExp(`\\(${PRE_READ_FALLBACK}\\)`),
+        `an off-list reason must fall back to ${PRE_READ_FALLBACK}`,
+      );
+      assert.equal(result.kind, 'not-inspected');
+      // Fail-closed: the substitution must not have let the read proceed.
+      assert.equal(io.opens, 0, 'no candidate may be opened');
+      assert.equal(io.lists, 0, 'the root must not be listed');
+    }
+  });
+
+  it('narrows runtime values to the closed set directly', () => {
+    for (const reason of PRE_READ_REFUSALS) assert.equal(toPreReadRefusal(reason), reason);
+    for (const bad of ['/etc/shadow', '', 0, false, null, undefined, {}, []]) {
+      assert.equal(toPreReadRefusal(bad), PRE_READ_FALLBACK, `off-list value ${String(bad)}`);
     }
   });
 
