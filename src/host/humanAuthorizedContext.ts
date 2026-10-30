@@ -27,14 +27,24 @@
  *
  * WHAT THIS IS NOT
  *
- * It is not proof that a filesystem is safe. Ownership, canonical-root and
- * pre-read checks still run, and the cooperative-workspace threat model is
- * unchanged: hostile concurrent replacement of a parent directory is not
- * reliably prevented or detected. The authorization says "the person chose this
- * directory"; it says nothing about the directory's contents or its honesty.
+ * A callback is **not** proof of a human decision. `runWorkspacePilot` will
+ * accept any function that returns `{ok: true, root: proposed, ...}` - a caller
+ * of the general pilot can supply one without ever showing a dialog. The
+ * trust boundary is *this wrapper*: `offerHumanAuthorizedContext` always passes
+ * `authorizeRootByHuman`, which asks the operator. The callback shape makes the
+ * root unforgeable *within this module*; it is not an unforgeable capability in
+ * the language sense, and the pilot's own comment says so too.
+ *
+ * Nor is it proof that a filesystem is safe. Canonical-root and symlink checks
+ * run in the reader; ownership and mount provenance are checked by the pre-read
+ * gate below, which can only refuse and never establishes that a directory is
+ * honest. The cooperative-workspace threat model is unchanged: hostile
+ * concurrent replacement of a parent directory is not reliably prevented or
+ * detected. The authorization says "the person chose this directory".
  */
 
 import * as nodePath from 'node:path';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
 
 import type { ModUi } from './modApi.ts';
 import {
@@ -42,7 +52,7 @@ import {
   pilotDisclosure,
   runWorkspacePilot,
 } from './workspacePilot.ts';
-import type { PilotRefusalReason, PilotResult } from './workspacePilot.ts';
+import type { PilotRefusalReason, PilotResult, PreReadDecision } from './workspacePilot.ts';
 import { verifiedEvidenceOf } from './offerRepositoryContext.ts';
 import type { RepositoryContextOutcome } from './offerRepositoryContext.ts';
 
@@ -180,12 +190,107 @@ export async function authorizeRootByHuman(
   return { ok: false, reason: 'authorization-malformed' };
 }
 
+/**
+ * The pre-read gate for the human path.
+ *
+ * Why this exists: `validateRoot` and the OS reader check the path, symlinks and
+ * canonical identity - they do **not** check UID ownership or whether the path
+ * lives on an acceptable local filesystem. `permittedParents` is derived from
+ * the approved root, so it proves nothing about provenance or localness. Without
+ * this gate the human flow would be reading an arbitrary directory while the
+ * handoff claimed ownership and mount checks ran.
+ *
+ * It can only refuse. It runs after the native grant and after the root is
+ * validated, and before any candidate file is opened.
+ *
+ * WHAT IT DOES NOT CLAIM
+ *
+ * `statfs.type` is not a portable mount guarantee, so none is invented from it.
+ * The check is narrow and honest:
+ *
+ *   - the root must be a directory, not a symlink, owned by the running user
+ *   - the mount table must be readable, and a mount must actually cover the path
+ *   - the deepest covering mount must not sit exactly on the root (that would be
+ *     something mounted over the prepared directory)
+ *   - when `/proc/mounts` is unavailable - macOS, for instance - the mount
+ *     conditions are reported as **unverifiable** and the read is refused, rather
+ *     than assumed safe. This is a deliberate narrowing: the human path stays
+ *     closed on platforms where the check cannot run.
+ *
+ * A bind mount of the same filesystem is indistinguishable from this metadata
+ * and is not detected. That remains a documented residual under Option A.
+ */
+export function verifyHumanRootPreconditions(
+  root: string,
+  options: { uid?: number; mountTable?: string | null } = {},
+): PreReadDecision {
+  let link;
+  let stat;
+  try {
+    link = lstatSync(root);
+    stat = statSync(root);
+  } catch {
+    return { ok: false, reason: 'root-not-directory' };
+  }
+  if (link.isSymbolicLink()) return { ok: false, reason: 'root-symlinked' };
+  if (!stat.isDirectory()) return { ok: false, reason: 'root-not-directory' };
+
+  // `process.getuid` does not exist on Windows. Without it there is no ownership
+  // check to make, and "could not check" must not read as "checked and fine".
+  const uid = options.uid ?? (typeof process.getuid === 'function' ? process.getuid() : undefined);
+  if (uid === undefined) return { ok: false, reason: 'mount-unverifiable' };
+  if (stat.uid !== uid) return { ok: false, reason: 'root-owner-mismatch' };
+
+  // An explicitly supplied "no table" means the caller knows it is unavailable.
+  let table: string;
+  if (options.mountTable === null) return { ok: false, reason: 'mount-unverifiable' };
+  if (typeof options.mountTable === 'string') {
+    table = options.mountTable;
+  } else {
+    try {
+      table = readFileSync('/proc/mounts', 'utf8');
+    } catch {
+      // No portable mount view on this platform: fail closed rather than guess.
+      return { ok: false, reason: 'mount-unverifiable' };
+    }
+  }
+
+  const covering = table
+    .split('\n')
+    .map((line) => line.split(' '))
+    .filter((fields) => fields.length >= 3)
+    .map((fields) => ({ point: fields[1]!.replace(/\\040/g, ' ') }))
+    .filter((entry) => root === entry.point || root.startsWith(entry.point.endsWith('/') ? entry.point : `${entry.point}/`));
+
+  if (covering.length === 0) return { ok: false, reason: 'mount-unverifiable' };
+
+  let deepest = covering[0]!;
+  for (const entry of covering) {
+    if (entry.point.length > deepest.point.length) deepest = entry;
+  }
+  // Something mounted exactly over the approved root means the path is no longer
+  // the directory that was approved.
+  if (deepest.point === root) return { ok: false, reason: 'root-is-a-mount-point' };
+
+  return { ok: true };
+}
+
+/**
+ * Appends the host-persistence note to any message.
+ *
+ * One helper for every outcome, including the ones that never reach the pilot:
+ * a person told "nothing was read" still deserves to know what the host keeps.
+ */
+function withHostPersistenceNote(body: string): string {
+  return `${body}\n\nHost persistence: ${PILOT_PERSISTENCE_STATEMENT}`;
+}
+
 /** Renders a pilot result, appending the host-persistence boundary. */
 function messageFor(result: PilotResult): string {
   const body = result.kind === 'inspected'
     ? renderInspected(result)
     : renderOther(result);
-  return `${body}\n\nHost persistence: ${PILOT_PERSISTENCE_STATEMENT}`;
+  return withHostPersistenceNote(body);
 }
 
 function renderOther(result: Exclude<PilotResult, { kind: 'inspected' }>): string {
@@ -233,12 +338,21 @@ function renderInspected(result: Extract<PilotResult, { kind: 'inspected' }>): s
  */
 export async function offerHumanAuthorizedContext(input: {
   ui: ModUi | undefined;
+  /**
+   * Test seam only. Lets a synthetic test supply a mount table on platforms that
+   * have no `/proc/mounts`, so the success path is exercisable without pretending
+   * a real mount guarantee exists. Production callers omit it and the gate reads
+   * the real table - or refuses when there is none.
+   */
+  mountTableForTests?: string;
 }): Promise<HumanAuthorizedOutcome> {
   if (!isUsable(input.ui)) {
     return {
       kind: 'idea-only',
       reason: 'no-ui',
-      message: 'Repository context was not offered: this host has no dialog surface, so nothing was read.',
+      message: withHostPersistenceNote(
+        'Repository context was not offered: this host has no dialog surface, so nothing was read.',
+      ),
     };
   }
 
@@ -247,7 +361,9 @@ export async function offerHumanAuthorizedContext(input: {
     return {
       kind: 'idea-only',
       reason: optIn.reason,
-      message: `Repository context was not used (${optIn.reason}), so nothing was read.`,
+      message: withHostPersistenceNote(
+        `Repository context was not used (${optIn.reason}), so nothing was read.`,
+      ),
     };
   }
 
@@ -256,6 +372,11 @@ export async function offerHumanAuthorizedContext(input: {
     // The root is established by the human step, not supplied here. There is no
     // `authorization` member on purpose.
     authorizeRoot: (proposed) => authorizeRootByHuman(input.ui as ModUi, proposed),
+    // Ownership and mount provenance, which the reader does not check. Fail-closed.
+    beforeRead: (root) => verifyHumanRootPreconditions(
+      root.canonical,
+      input.mountTableForTests === undefined ? {} : { mountTable: input.mountTableForTests },
+    ),
   });
 
   if (result.kind !== 'inspected') {
