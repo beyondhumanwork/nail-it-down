@@ -221,37 +221,51 @@ describe('human authorization: idea-only needs no filesystem', () => {
     assert.match(testOnly, /ui: ModUi \| undefined/);
     assert.doesNotMatch(testOnly, /\b(root|authorization|fixtureRoot)\b/, 'the test helper names no root either');
 
-    // Runtime proof, not just a signature check: drive the production entrypoint
-    // with a real synthetic workspace and a fabricated table that WOULD satisfy
-    // the gate, and confirm the gate still refuses. If the override were ever
-    // forwarded, this root would be inspected and the assertion would fail.
+    // Runtime proof, not just a signature check. The forged table demonstrably
+    // satisfies the gate, so if the production entrypoint ever consulted it the
+    // outcome would differ from a run with no table at all.
+    //
+    // The assertion is written to hold on *both* kinds of platform: one whose
+    // real gate accepts this root, and one whose real gate refuses it. An earlier
+    // version asserted `idea-only` unconditionally and then expected `inspected`
+    // when the real gate passed - two contradictory claims, whichever platform ran
+    // it.
     const { root } = workspace();
     const { verifyHumanRootPreconditions } = await import('../src/host/humanAuthorizedContext.ts');
     const satisfying = TABLE(root);
 
-    // Sanity: the fabricated table is genuinely one that satisfies the gate, so a
-    // refusal below proves the table was not consulted.
-    const withTable = verifyHumanRootPreconditions(root, { mountTable: satisfying });
-    assert.equal(withTable.ok, true, 'the fabricated table must satisfy the gate, or this test proves nothing');
+    // Sanity: the fabricated table genuinely satisfies the gate, so any refusal
+    // below is only explicable by the table having been ignored.
+    assert.equal(
+      verifyHumanRootPreconditions(root, { mountTable: satisfying }).ok,
+      true,
+      'the fabricated table must satisfy the gate, or this test proves nothing',
+    );
 
-    const forged = {
+    const bare = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)) });
+    const forged = await offerHumanAuthorizedContext({
       ui: ui(FULL_GRANT(root)),
       mountTable: satisfying,
       mountTableForTests: satisfying,
-    } as unknown as Parameters<typeof offerHumanAuthorizedContext>[0];
+    } as unknown as Parameters<typeof offerHumanAuthorizedContext>[0]);
 
-    const outcome = await offerHumanAuthorizedContext(forged);
-    assert.equal(outcome.kind, 'idea-only', 'a forged mount table must not produce an inspection');
-    // On a platform with no real table the gate refuses; on Linux the real table
-    // applies and the root legitimately passes. Either way the *fabricated* data
-    // was not used: what matters is that the outcome matches the real platform,
-    // not the forged string.
+    const verdict = (outcome: typeof bare): string =>
+      outcome.kind === 'idea-only' ? `idea-only:${outcome.reason}` : outcome.kind;
+
+    // 1. Attaching forged mount data changed nothing at all.
+    assert.equal(verdict(forged), verdict(bare), 'a forged mount table must not change the outcome');
+
+    // 2. The outcome is whatever this platform's *real* gate decides.
     const realGate = verifyHumanRootPreconditions(root);
     if (realGate.ok) {
-      assert.equal(outcome.kind, 'inspected', 'when the real gate passes, so does the flow');
+      assert.equal(bare.kind, 'inspected', 'where the real gate accepts, the flow inspects');
     } else {
-      assert.match((outcome as { reason: string }).reason, /pre-read-check-failed/,
-        'when the real gate refuses, the flow refuses too - the forged table did not help');
+      assert.equal(bare.kind, 'idea-only', 'where the real gate refuses, the flow refuses');
+      assert.match(
+        (bare as { reason: string }).reason,
+        /pre-read-check-failed/,
+        'and it refuses at the pre-read gate specifically',
+      );
     }
   });
 });
