@@ -75,8 +75,10 @@ export function usage(): string {
     '/naildown <your idea>   start an interview for this goal',
     '/naildown resume        continue: answer, revise, defer, or approve',
     '/naildown status        what is actually saved for this workspace',
+    '/naildown context       optional repository context (experimental, off by default)',
     '',
     'Three questions, and the later ones wait for the first. It does not read your files, call a model, or change anything.',
+    'The context command is the only one that can read files, and only after three separate permissions.',
   ].join('\n');
 }
 

@@ -1,5 +1,7 @@
 import type { ModApi, ModUi } from './host/modApi.ts';
 import { parseIntent } from './core/commands.ts';
+import { offerHumanAuthorizedContext } from './host/humanAuthorizedContext.ts';
+import type { HumanAuthorizedOutcome } from './host/humanAuthorizedContext.ts';
 import { ACTIONS, APPROVAL, TITLES } from './core/copy.ts';
 import * as copy from './core/copy.ts';
 import {
@@ -74,17 +76,42 @@ export default function nailItDown(cmd: ModApi): void {
     delete: (key) => cmd.store.delete(key),
   };
 
+  //
+  // Experimental repository-context gate.
+  //
+  // Registered as a host **flag**, which the host keeps in a per-process Map:
+  // it is deliberately NOT persisted, so it cannot be enabled once and inherited
+  // by a later session, and `cmd.store` never learns it exists. Off unless the
+  // harness passes `--mod-option experimentalRepositoryContext=true`.
+  //
+  // Enabling the gate is *not* consent: it only makes `/naildown context`
+  // possible. The command still asks its own opt-in, its own root authorization
+  // and its own read consent, and any of the three can refuse.
+  //
+  // Optional call: an older host without `addFlag` simply never registers the
+  // flag, `getFlag` returns undefined, and the gate stays disabled. Absence must
+  // read as "off", never as "on".
+  cmd.addFlag?.('experimentalRepositoryContext', {
+    type: 'boolean',
+    default: false,
+    description: 'Enable the experimental /naildown context command (default: off)',
+  });
+
   cmd.addCommand({
     name: 'naildown',
     description: 'Settle what you are building before anything gets built',
-    argumentHint: '<your idea> | status | resume | help',
+    argumentHint: '<your idea> | status | resume | help | context',
     handler: async ({ args, ui, cwd }) => ({
-      message: await run({ store, ui, workspace: workspaceKeyFrom(cwd) }, args),
+      message: await run(
+        { store, ui, workspace: workspaceKeyFrom(cwd) },
+        args,
+        cmd.getFlag?.('experimentalRepositoryContext') === true,
+      ),
     }),
   });
 }
 
-async function run(deps: Deps, args: string): Promise<string> {
+async function run(deps: Deps, args: string, contextEnabled: boolean): Promise<string> {
   const intent = parseIntent(args);
 
   try {
@@ -95,6 +122,13 @@ async function run(deps: Deps, args: string): Promise<string> {
         return showStatus(deps);
       case 'resume':
         return resumeInterview(deps);
+      case 'context':
+        return runContext(deps, contextEnabled);
+      case 'context-invalid':
+        return [
+          intent.detail,
+          'Run /naildown context on its own; it cannot take a path.',
+        ].join('\n');
       case 'start':
         return startGoal(deps, intent.goal);
     }
@@ -104,6 +138,40 @@ async function run(deps: Deps, args: string): Promise<string> {
       'Nothing was approved. Run /naildown status to see what is actually saved.',
     ].join('\n');
   }
+}
+
+/**
+ * The optional repository-context step.
+ *
+ * Display only: it returns a message and never touches the session, the decision
+ * graph, or `cmd.store`. Nothing it produces can approve an interview or settle a
+ * decision, and it holds no repository evidence of its own.
+ *
+ * Model submission is deliberately out of reach: the result is `{ message }` and
+ * never `{ prompt }`. M2-7C empirically established that messages and notices do
+ * not enter the model-context array in Command Code 1.88.0 - that result is
+ * specific to the version observed and is not generalised here.
+ *
+ * The `--no-session` caveat is real and unresolved: the M2-7 host test only ever
+ * ran with `--no-session`, so normal-session persistence of what this command
+ * displays has never been established. An interactive pilot must stay in that
+ * verified isolated mode until it is.
+ */
+async function runContext(deps: Deps, contextEnabled: boolean): Promise<string> {
+  if (!contextEnabled) {
+    return [
+      'Repository context is experimental and currently disabled.',
+      '',
+      'It is off unless this session was started with the flag that enables it.',
+      'Enabling that flag would still not read anything: the command asks for',
+      'explicit permission at three separate points, and any of them can refuse.',
+      '',
+      'The interview works without repository context, so nothing is missing here.',
+    ].join('\n');
+  }
+
+  const outcome: HumanAuthorizedOutcome = await offerHumanAuthorizedContext({ ui: deps.ui });
+  return outcome.message;
 }
 
 // ---------------------------------------------------------------------------
