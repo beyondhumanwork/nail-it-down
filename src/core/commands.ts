@@ -18,9 +18,17 @@ export type Intent =
    * The optional repository-context step.
    *
    * Never carries a path: `context` with any trailing text is a rejection, not a
-   * root and not a goal. Accepting arguments here would put a filesystem path
-   * into slash-command history, and the M2-7 run showed that history *is*
-   * written to disk.
+   * root and not a goal.
+   *
+   * What that rejection *can* prevent: the path being used, being echoed back, or
+   * starting an interview whose goal is that path.
+   *
+   * What it cannot prevent: the host writing the typed text to slash-command
+   * history. Command Code records what the user typed **before** the mod receives
+   * or rejects the command - M2-7 observed `/nid-m27-probe` in
+   * `~/.commandcode/history.jsonl` - so a path typed after `context` may already
+   * be on disk by the time this parser sees it. The no-arguments contract keeps a
+   * path from being *accepted*, which is the part a mod can control.
    */
   | { kind: 'context' }
   | { kind: 'context-invalid'; detail: string }
@@ -38,8 +46,11 @@ export function parseIntent(args: unknown): Intent {
 
   // `context` takes no arguments. Anything after the word is refused rather than
   // folded into the goal, because "context /home/me/repo" would otherwise start a
-  // *new interview* whose goal is that path - and would write the path to
-  // history. The detail names no path back, so nothing new is echoed.
+  // *new interview* whose goal is that path.
+  //
+  // This does not un-write anything: the host records typed slash-command text
+  // before the mod runs, so a path typed here may already be in history. It keeps
+  // the path from being accepted, used, or echoed - see the Intent comment.
   if (lowered === 'context') return { kind: 'context' };
   const head = lowered.split(/\s+/)[0];
   if (head === 'context') {

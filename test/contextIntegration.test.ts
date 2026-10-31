@@ -249,12 +249,70 @@ describe('M2-8: three independent refusals', () => {
 // ---------------------------------------------------------------------------
 
 describe('M2-8: a bounded inspection displays citations', () => {
-  it('cites verified evidence from an allowlisted synthetic fixture', async () => {
-    const { root, mountinfo } = fixture();
-    // The production path has no mount-table injection, and macOS has no
-    // /proc/self/mountinfo, so the real gate refuses there. This test asserts the
-    // *refusal* on this platform, which is the honest outcome - the positive path
-    // is covered by the humanAuthorizedContextForTests suite.
+  it('inspects through the REAL production handler and cites verified evidence', async () => {
+    // Load-bearing: this dispatches the handler that src/index.ts actually
+    // registers, with no test-only context helper in the path. On this platform
+    // there is no /proc/self/mountinfo, so the only way to reach the inspected
+    // branch is to stub that one OS read. Everything else - the gate, the three
+    // dialogs, validateRoot, the reader, the ceiling, the citations - is real.
+    const { root } = fixture();
+    const mountinfo = [
+      `1 0 8:1 / / rw,relatime - ext4 /dev/sda1 rw`,
+      `2 1 8:4 / ${nodePath.dirname(root)} rw,relatime - ext4 /dev/sda4 rw`,
+    ].join('\n') + '\n';
+
+    const patchable = fsDefault as unknown as Record<string, unknown>;
+    const originalRead = fsDefault.readFileSync;
+    let stubbed = 0;
+    let result: { message?: string; prompt?: string } | undefined;
+    const h = host({ flagValue: true });
+
+    try {
+      patchable.readFileSync = ((target: unknown, ...rest: unknown[]) => {
+        if (String(target) === '/proc/self/mountinfo') {
+          stubbed += 1;
+          return mountinfo;
+        }
+        return (originalRead as (...v: unknown[]) => unknown)(target, ...rest);
+      }) as typeof fsDefault.readFileSync;
+      syncBuiltinESMExports();
+
+      result = await h.run('context', ui({
+        optIn: OPT_IN_LABELS.useRepository,
+        typed: root,
+        authorize: AUTHORIZE_LABELS.grant,
+        consent: CONSENT_LABELS.grant,
+      }));
+    } finally {
+      patchable.readFileSync = originalRead;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(stubbed > 0, true, 'the mount stub must actually have been consulted');
+
+    const message = result?.message ?? '';
+    // The decisive assertions: it really inspected, and it really cited.
+    assert.match(message, /Read \d+ files/, 'the production handler must reach the inspected branch');
+    assert.match(message, /Cited from the workspace/, 'a citation section must be present');
+    assert.match(message, /package\.json/, 'the citation must name the manifest');
+    assert.match(message, /"left-pad"/, 'the citation must carry the declared dependency');
+    assert.match(message, /lines? \d+/, 'the citation must carry a line span');
+
+    // Nothing left the mod's control.
+    assert.equal(result?.prompt, undefined, 'no model turn may be submitted');
+    assert.deepEqual(h.storeWrites, [], 'no evidence or consent may be persisted');
+  });
+
+  it('refuses on a platform with no mount table, rather than guessing', async () => {
+    // The separate, explicit refusal case the review asked to keep: with the real
+    // /proc/self/mountinfo absent (macOS), the gate must refuse and read nothing.
+    if (fs.existsSync('/proc/self/mountinfo')) {
+      // On Linux the positive test above already covers the accept path; the
+      // refusal is exercised by the synthetic mount tables in
+      // linuxFilesystemTrust.test.ts. Nothing to assert here without faking it.
+      return;
+    }
+    const { root } = fixture();
     const h = host({ flagValue: true });
     const result = await h.run('context', ui({
       optIn: OPT_IN_LABELS.useRepository,
@@ -263,16 +321,9 @@ describe('M2-8: a bounded inspection displays citations', () => {
       consent: CONSENT_LABELS.grant,
     }));
     const message = result.message ?? '';
-    assert.ok(message.length > 0);
-    // Either it inspected (Linux + real mountinfo) or it refused at the filesystem
-    // gate. Both are correct; it must never claim evidence it did not verify.
-    if (/Read \d+ files/.test(message)) {
-      assert.match(message, /package\.json/);
-    } else {
-      assert.match(message, /nothing was read|Filesystem type is NOT VERIFIED|mount/i);
-    }
-    assert.equal(result.prompt, undefined, 'no model turn may be submitted');
-    void mountinfo;
+    assert.doesNotMatch(message, /Read \d+ files/, 'nothing may be inspected without a mount view');
+    assert.match(message, /mount/i, 'the refusal must name the mount reason');
+    assert.equal(result.prompt, undefined);
   });
 
   it('never returns a prompt on any path', async () => {
