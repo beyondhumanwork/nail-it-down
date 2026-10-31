@@ -105,7 +105,13 @@ export type PilotRefusalReason =
   | ConsentRefusalReason
   | 'authorization-invalid'
   | 'not-authorized-root'
-  /** The disclosure could not be put on screen, so the grant could not be informed. */
+  /** The root identity the person authorised, recomputed to be compared. */
+  | 'authorization-mismatch'
+  /** The human authorisation could not be shown the terms, so it is not authority. */
+  | 'authorization-disclosure-failed'
+  /** The human authorisation step answered with something unusable. */
+  | 'authorization-malformed'
+  /** The read disclosure could not be put on screen, so the grant could not be informed. */
   | 'no-disclosure-surface'
   | 'disclosure-failed';
 
@@ -293,7 +299,29 @@ function refusal(reason: PilotRefusalReason, shownRoot: string): PilotResult {
  */
 export async function runWorkspacePilot(input: {
   ui: ModUi | undefined;
-  authorization: PilotAuthorization;
+  /**
+   * Static authorization. Synthetic fixtures supply this; a human-authorised
+   * invocation supplies `authorizeRoot` instead and leaves this out.
+   */
+  authorization?: PilotAuthorization;
+  /**
+   * Mid-sequence human authorization.
+   *
+   * Called after the proposal and *before* the read consent, so the person can
+   * be shown exactly what they are about to authorise. It returns the root that
+   * a positive human decision established - or `undefined`, which aborts.
+   *
+   * This is a *function* rather than a value on purpose: a caller cannot pass a
+   * path and call it authority. The only way to reach this branch is for the
+   * dialog to have been answered affirmatively at runtime, in order.
+   *
+   * It runs after the proposal and before any disclosure or consent, and no
+   * filesystem call happens in this module until both steps have returned.
+   */
+  authorizeRoot?: (proposed: string) => Promise<
+    | { ok: true; root: string; issuedBy: string }
+    | { ok: false; reason: PilotRefusalReason }
+  >;
   /**
    * Optional gate that runs after the native grant and after the root has been
    * validated and resolved, but **before any candidate file is opened**.
@@ -310,22 +338,44 @@ export async function runWorkspacePilot(input: {
   beforeRead?: (root: PilotRoot) => PreReadDecision;
 }): Promise<PilotResult> {
   const authorizedRoot = authorizedRootOf(input.authorization);
-
   // 1. Proposal. Dialogs only.
   const proposal = await proposeWorkspaceRoot(input.ui, { suggestion: authorizedRoot });
   if (!proposal.ok) return refusal(proposal.reason, authorizedRoot ?? '<no workspace proposed>');
 
-  // 2. Exactly the authorized root, or nothing. Lexical, so a typed path is
-  //    never inspected — not even its metadata — before it is known to be ours.
-  if (authorizedRoot === undefined) return refusal('authorization-invalid', proposal.root);
-  if (proposal.root !== authorizedRoot) return refusal('not-authorized-root', proposal.root);
-
-  // 3. Disclosure, then the native refusal-first choice.
+  // 2. Root authorization. Exactly one route, and neither is a value the caller
+  //    can fabricate:
   //
-  //    The disclosure is not decoration: a grant made without it is not an
-  //    informed grant. So a host that cannot show it is refused outright rather
-  //    than asked a question whose terms were never displayed. This is the
-  //    fail-closed direction - the absence of a surface is never permission.
+  //      - a static fixture authorization, compared lexically; or
+  //      - a *mid-sequence human decision*, which the person makes here, after
+  //        the proposal and before the read consent.
+  //
+  //    Both come before any filesystem access, so a typed path is never stat'ed,
+  //    resolved or opened before it is authorised.
+  let effectiveRoot: string;
+  if (input.authorizeRoot !== undefined) {
+    const authorised = await input.authorizeRoot(proposal.root);
+    if (!authorised.ok) return refusal(authorised.reason, proposal.root);
+    // The human decision names a root; it must be the one that was proposed. A
+    // mismatch means the two answers disagree, and disagreement is not consent.
+    if (typeof authorised.root !== 'string' || !nodePath.isAbsolute(authorised.root)) {
+      return refusal('authorization-malformed', proposal.root);
+    }
+    if (nodePath.resolve(authorised.root) !== proposal.root) {
+      return refusal('authorization-mismatch', proposal.root);
+    }
+    effectiveRoot = proposal.root;
+  } else {
+    if (authorizedRoot === undefined) return refusal('authorization-invalid', proposal.root);
+    if (proposal.root !== authorizedRoot) return refusal('not-authorized-root', proposal.root);
+    effectiveRoot = authorizedRoot;
+  }
+
+  // 3. Read disclosure, then the native refusal-first read consent.
+  //
+  //    Distinct from step 2 by design: authorising a root is not authorising a
+  //    read. The disclosure is not decoration either - a grant made without it
+  //    is not an informed grant - so a host that cannot show it is refused
+  //    outright rather than asked a question whose terms were never displayed.
   const disclosure = pilotDisclosure(proposal.root);
   const notify = input.ui?.notify;
   if (typeof notify !== 'function') return refusal('no-disclosure-surface', proposal.root);
@@ -344,13 +394,14 @@ export async function runWorkspacePilot(input: {
   });
   if (consent.kind !== 'granted') return refusal(consent.reason, proposal.root);
 
-  // 4. Only now may the target root be resolved and checked.
-  if (authorizedRoot === undefined) return refusal('authorization-invalid', proposal.root);
+  // 4. Only now may the target root be resolved and checked. `effectiveRoot` is
+  //    the root that actually passed step 2 - a fixture match or a human
+  //    decision - never the raw proposal.
   const opened = createNodeRepositoryReader({
-    root: authorizedRoot,
-    // Derived from the authorized root, never supplied independently: a caller
+    root: effectiveRoot,
+    // Derived from the authorised root, never supplied independently: a caller
     // cannot widen the provenance by passing its own parent.
-    permittedParents: [nodePath.dirname(authorizedRoot)],
+    permittedParents: [nodePath.dirname(effectiveRoot)],
   });
   if (!opened.ok) {
     return { kind: 'not-inspected', reason: opened.reason, detail: opened.detail, disclosure };
@@ -361,7 +412,7 @@ export async function runWorkspacePilot(input: {
   // resolution - that is a different directory from the one that was approved,
   // and reading it would be reading something nobody agreed to. Refuse here,
   // before the root is listed and before a single candidate is opened.
-  if (opened.canonicalRoot !== authorizedRoot) {
+  if (opened.canonicalRoot !== effectiveRoot) {
     return {
       kind: 'not-inspected',
       reason: 'unexpected-canonical-root',
