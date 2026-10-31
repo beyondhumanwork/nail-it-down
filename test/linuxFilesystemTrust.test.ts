@@ -182,19 +182,124 @@ describe('filesystem policy: mount structure is checked', () => {
 
   it('refuses malformed lines rather than skipping into a false pass', () => {
     const root = fixture();
-    // Truncated line plus a valid `/` entry: the truncated one cannot cover, and
-    // `/` alone leaves the root on ext4 - which is why the real deepest mount
-    // matters. Here the result is acceptable, and the test documents that a
-    // malformed *extra* line does not poison a well-formed covering entry.
+    // A malformed record could be the deeper mount, so its presence is a refusal
+    // even alongside a well-formed shallower entry. Accepting the valid `/` line
+    // while discarding the garbage is precisely how a deeper nfs mount would hide.
     const mixed = `garbage\n${entry({ id: 1, point: '/', fstype: 'ext4' })}\n`;
     const result = decision(root, mixed);
-    assert.equal(result.ok, true, 'a malformed extra line must not corrupt a valid entry');
+    assert.equal(result.ok, false, 'a malformed record must refuse, not be skipped');
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
   });
 
   it('refuses a table containing only malformed lines', () => {
     const result = decision(fixture(), 'garbage\nmore garbage\n');
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+});
+
+describe('filesystem policy: stacked mounts at one path are ambiguous', () => {
+  /**
+   * Two mounts at the same point, as Linux produces when one filesystem is
+   * mounted over another. Per proc(5) the top-most is the one that is not the
+   * parent of any other at that location - so "last line wins" is wrong, and this
+   * gate refuses rather than resolving topology.
+   */
+  const stacked = (root: string, order: 'ext4-first' | 'nfs-first'): string => {
+    const parent = nodePath.dirname(root);
+    const ext4 = entry({ id: 10, parent: 1, point: parent, fstype: 'ext4', source: '/dev/sda4' });
+    const nfs = entry({ id: 11, parent: 10, point: parent, fstype: 'nfs4', source: 'server:/export' });
+    const rootEntry = entry({ id: 1, point: '/', fstype: 'ext4' });
+    const stackedLines = order === 'ext4-first' ? [ext4, nfs] : [nfs, ext4];
+    return [rootEntry, ...stackedLines].join('\n') + '\n';
+  };
+
+  it('refuses an ext4/nfs4 stack when ext4 is listed first', () => {
+    const root = fixture();
+    const result = decision(root, stacked(root, 'ext4-first'));
+    assert.equal(result.ok, false, 'a stacked mount must not be admitted');
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('refuses the same stack when nfs4 is listed first', () => {
+    const root = fixture();
+    const result = decision(root, stacked(root, 'nfs-first'));
+    assert.equal(result.ok, false, 'textual order must not change the verdict');
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('refuses a stack of two allowlisted filesystems too', () => {
+    // Ambiguity is refused regardless of what is stacked: the gate cannot tell
+    // which one is visible, so it cannot tell which one it would be reading.
+    const root = fixture();
+    const parent = nodePath.dirname(root);
+    const outer = entry({ id: 10, parent: 1, point: parent, fstype: 'ext4', source: '/dev/sda4' });
+    const inner = entry({ id: 11, parent: 10, point: parent, fstype: 'xfs', source: '/dev/sdb1' });
+    const result = decision(root, [entry({ id: 1, point: '/', fstype: 'ext4' }), outer, inner].join('\n') + '\n');
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('refuses a stack of two records with the same filesystem type', () => {
+    // The case that distinguishes "ambiguous" from "conflicting types": two ext4
+    // records at one path are still ambiguous, because the gate cannot tell which
+    // one it would be reading. Requiring differing types would let this pass.
+    const root = fixture();
+    const parent = nodePath.dirname(root);
+    const outer = entry({ id: 10, parent: 1, point: parent, fstype: 'ext4', source: '/dev/sda4' });
+    const inner = entry({ id: 11, parent: 10, point: parent, fstype: 'ext4', source: '/dev/sdc1' });
+    const result = decision(root, [entry({ id: 1, point: '/', fstype: 'ext4' }), outer, inner].join('\n') + '\n');
+    assert.equal(result.ok, false, 'same-type stacking is still ambiguous');
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('still accepts a single well-formed deepest mount', () => {
+    // The regression guard: refusing ambiguity must not refuse the ordinary case.
+    const root = fixture();
+    const result = decision(root, table(root, 'ext4'));
+    assert.equal(result.ok, true);
+  });
+
+  it('still prefers a deeper single mount over a shallower one', () => {
+    const root = fixture();
+    const deeper = [
+      entry({ id: 1, point: '/', fstype: 'ext4' }),
+      entry({ id: 2, parent: 1, point: nodePath.dirname(root), fstype: 'nfs4' }),
+    ].join('\n') + '\n';
+    const result = decision(root, deeper);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'mount-not-acceptable');
+  });
+});
+
+describe('filesystem policy: a malformed record cannot hide a deeper mount', () => {
+  it('refuses when a garbage line accompanies a shallow allowlisted entry', () => {
+    // The dangerous shape: a valid `/` on ext4 plus a truncated record that might
+    // have been the deeper network mount. Skipping it would accept the root.
+    const root = fixture();
+    const mixed = `garbage line that cannot parse\n${entry({ id: 1, point: '/', fstype: 'ext4' })}\n`;
+    const result = decision(root, mixed);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('refuses a truncated deeper record next to a valid covering one', () => {
+    const root = fixture();
+    const parent = nodePath.dirname(root);
+    const text = [
+      entry({ id: 1, point: '/', fstype: 'ext4' }),
+      entry({ id: 2, parent: 1, point: parent, fstype: 'ext4' }),
+      // A plausible deeper mount whose type field is missing entirely.
+      `3 2 0:99 / ${parent}/sub rw,relatime`,
+    ].join('\n') + '\n';
+    const result = decision(root, text);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'mount-unverifiable');
+  });
+
+  it('accepts a fully well-formed table', () => {
+    const root = fixture();
+    assert.equal(decision(root, table(root, 'ext4')).ok, true);
   });
 });
 
@@ -245,20 +350,23 @@ describe('filesystem policy: parsing', () => {
       '37 36 0:2 / /mnt3 rw - tmpfs tmpfs rw,size=1024k',
     ].join('\n');
     const parsed = parseMountInfo(text);
-    assert.equal(parsed.length, 2);
-    assert.deepEqual(parsed[0], { root: '/mnt1', point: '/mnt2', fstype: 'ext3', source: '/dev/root' });
-    assert.deepEqual(parsed[1], { root: '/', point: '/mnt3', fstype: 'tmpfs', source: 'tmpfs' });
+    assert.equal(parsed.malformed, false);
+    assert.equal(parsed.mounts.length, 2);
+    assert.deepEqual(parsed.mounts[0], { root: '/mnt1', point: '/mnt2', fstype: 'ext3', source: '/dev/root' });
+    assert.deepEqual(parsed.mounts[1], { root: '/', point: '/mnt3', fstype: 'tmpfs', source: 'tmpfs' });
   });
 
-  it('reports a missing type as undefined rather than guessing one', () => {
+  it('flags a record with no type separator as malformed rather than guessing', () => {
+    // Missing `-`: unclassifiable, and it might be the deeper mount, so the gate
+    // must refuse rather than discard it.
     const parsed = parseMountInfo('1 0 8:1 / /mnt rw,relatime\n');
-    assert.equal(parsed.length, 1);
-    assert.equal(parsed[0]?.fstype, undefined);
+    assert.equal(parsed.malformed, true);
   });
 
-  it('ignores blank lines', () => {
+  it('ignores blank lines without flagging them', () => {
     const parsed = parseMountInfo('\n\n1 0 8:1 / /mnt rw - ext4 /dev/sda1 rw\n\n');
-    assert.equal(parsed.length, 1);
+    assert.equal(parsed.malformed, false);
+    assert.equal(parsed.mounts.length, 1);
   });
 });
 

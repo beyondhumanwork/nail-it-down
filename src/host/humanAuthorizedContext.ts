@@ -297,31 +297,75 @@ export function decodeMountField(field: string): string {
  *
  * The optional fields between the mount options and the `-` vary per mount, so
  * the separator has to be located rather than indexed positionally.
+ *
+ * **A malformed record is fatal, not skipped.** Skipping is the dangerous choice:
+ * the line that fails to parse might be the deeper mount, so discarding it would
+ * leave a shallower allowlisted entry looking like the deepest one and the gate
+ * would accept a root it cannot actually classify. The presence of an
+ * unparseable record sets `malformed`, and the caller refuses.
  */
-export function parseMountInfo(text: string): ParsedMount[] {
+export function parseMountInfo(text: string): { mounts: ParsedMount[]; malformed: boolean } {
   const mounts: ParsedMount[] = [];
+  let malformed = false;
+
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue;
     const fields = line.split(' ');
     const dash = fields.indexOf('-');
-    if (fields.length < 5) continue;
     const root = fields[3];
     const point = fields[4];
-    if (root === undefined || point === undefined) continue;
+
+    // A usable record needs at least five fields before optional ones, a root, a
+    // mount point, and a `-` introducing the type. Anything short of that cannot
+    // be classified, and cannot be safely discarded either.
+    if (fields.length < 5 || root === undefined || point === undefined || dash === -1) {
+      malformed = true;
+      continue;
+    }
+
     mounts.push({
       root: decodeMountField(root),
       point: decodeMountField(point),
-      fstype: dash === -1 ? undefined : fields[dash + 1],
-      source: dash === -1 ? undefined : fields[dash + 2],
+      fstype: fields[dash + 1],
+      source: fields[dash + 2],
     });
   }
-  return mounts;
+
+  return { mounts, malformed };
 }
 
 /** True when `point` covers `target` (or is the target itself). */
 function covers(point: string, target: string): boolean {
   if (target === point) return true;
   return target.startsWith(point.endsWith('/') ? point : `${point}/`);
+}
+
+/**
+ * How many distinct covering mounts sit at the deepest mount point.
+ *
+ * When Linux stacks mounts at one path, `/proc/self/mountinfo` lists them all at
+ * that path and their **parent IDs** say which is on top: per proc(5), "the
+ * top-most mount is the one that is not the parent of any other mount at the same
+ * location". Choosing the last-listed record is therefore not the top mount; it
+ * is whatever the kernel happened to print last.
+ *
+ * Rather than implement a mount-topology resolver for a narrowly scoped
+ * cooperative gate, ambiguity is refused. Two mounts at one path is exactly the
+ * case where guessing wrong admits a network filesystem that is visually hidden
+ * behind a local one.
+ */
+function deepestIsAmbiguous(mounts: readonly ParsedMount[]): boolean {
+  let deepestLength = -1;
+  for (const entry of mounts) {
+    if (entry.point.length > deepestLength) deepestLength = entry.point.length;
+  }
+  if (deepestLength === -1) return true;
+  const atDeepest = mounts.filter((entry) => entry.point.length === deepestLength);
+  if (atDeepest.length > 1) return true;
+  // Even a single record at the deepest point must not be missing its type: that
+  // is an unclassifiable mount, not a known-safe one.
+  const [only] = atDeepest;
+  return only === undefined || only.fstype === undefined || only.fstype === '';
 }
 
 export function verifyHumanRootPreconditions(
@@ -367,32 +411,40 @@ export function verifyHumanRootPreconditions(
     }
   }
 
-  const mounts = parseMountInfo(table).filter((entry) => covers(entry.point, root));
+  const parsed = parseMountInfo(table);
+  // An unparseable record could be the deeper mount, so its presence alone is a
+  // refusal - not a reason to fall back to whatever did parse.
+  if (parsed.malformed) return { ok: false, reason: 'mount-unverifiable' };
+
+  const mounts = parsed.mounts.filter((entry) => covers(entry.point, root));
   if (mounts.length === 0) return { ok: false, reason: 'mount-unverifiable' };
+
+  // Refuse before selecting anything when the deepest covering point is
+  // ambiguous - two stacked mounts, or one with no type. Selecting "the last one
+  // listed" would not be the Linux top-mount rule, and the mistake only surfaces
+  // when a local filesystem sits above a network one at the same path.
+  if (deepestIsAmbiguous(mounts)) return { ok: false, reason: 'mount-unverifiable' };
 
   // The deepest covering mount is the filesystem the path actually lives on.
   let deepest = mounts[0]!;
   for (const entry of mounts) {
-    if (entry.point.length >= deepest.point.length) deepest = entry;
+    if (entry.point.length > deepest.point.length) deepest = entry;
   }
 
   // Something mounted exactly over the approved root means the path is no longer
   // the directory that was approved.
   if (deepest.point === root) return { ok: false, reason: 'root-is-a-mount-point' };
 
-  // An entry without a `-` separator carries no filesystem type, so it cannot be
-  // classified. Unknown is not the same as safe.
-  if (deepest.fstype === undefined || deepest.fstype === '') {
-    return { ok: false, reason: 'mount-unverifiable' };
-  }
-
   // Everything not on the allowlist is refused, including filesystems this build
   // has never heard of. `network` is reported separately only so the reason a
   // caller sees is the more informative one; both refuse.
-  if (!LINUX_LOCAL_FILESYSTEMS.includes(deepest.fstype)) {
+  const fstype = deepest.fstype;
+  if (fstype === undefined || !LINUX_LOCAL_FILESYSTEMS.includes(fstype)) {
     return {
       ok: false,
-      reason: NETWORK_FILESYSTEMS.includes(deepest.fstype) ? 'mount-not-acceptable' : 'mount-unverifiable',
+      reason: fstype !== undefined && NETWORK_FILESYSTEMS.includes(fstype)
+        ? 'mount-not-acceptable'
+        : 'mount-unverifiable',
     };
   }
 
