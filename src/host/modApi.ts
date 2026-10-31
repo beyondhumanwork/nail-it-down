@@ -103,6 +103,16 @@ export type ModApi = {
   readonly cwd: string;
   readonly ui: ModUi;
   readonly store: ModStore;
+  /**
+   * Declare a named option, filled from repeatable `--mod-option name=value`
+   * flags at launch. Verified against Command Code 1.88.0 `dist/cli.mjs`:
+   * `addFlag: (name, spec) => (flags.set(name, spec), ...)` with the value stored
+   * in a per-process `Map`, so a flag is **session-scoped and never persisted**.
+   * That property is why the experimental gate uses a flag rather than a setting.
+   */
+  addFlag?(name: string, spec: { type: 'boolean' | 'string'; default?: boolean | string; description?: string }): Disposable;
+  /** The flag's value, or `undefined` when the host never registered it. */
+  getFlag?(name: string): boolean | string | undefined;
   addCommand(command: {
     name: string;
     description?: string;
