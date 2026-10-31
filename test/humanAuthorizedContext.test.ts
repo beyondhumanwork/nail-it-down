@@ -23,6 +23,7 @@ import {
   authorizeRootByHuman,
   hasVerifiedHumanEvidence,
   offerHumanAuthorizedContext,
+  offerHumanAuthorizedContextForTests,
 } from '../src/host/humanAuthorizedContext.ts';
 import { CONSENT_LABELS } from '../src/host/repositoryConsent.ts';
 import { PILOT_PERSISTENCE_STATEMENT } from '../src/host/workspacePilot.ts';
@@ -192,27 +193,66 @@ describe('human authorization: idea-only needs no filesystem', () => {
     if (result.kind === 'idea-only') assert.equal(result.reason, 'opted-out');
   });
 
-  it('has no root parameter a caller could use to authorise anything', () => {
-    // Structural: the exported entrypoint takes only `ui`. A caller cannot name
-    // a root, so there is nothing to forge.
+  it('has no root parameter and no mount-table override a caller could forge', async () => {
+    // Two separate forgery paths must both be closed on the production entrypoint:
+    // naming a root, and fabricating the mount data the gate consults.
     const source = fs.readFileSync(
       nodePath.join(import.meta.dirname, '..', 'src', 'host', 'humanAuthorizedContext.ts'),
       'utf8',
     );
-    const signature = source.slice(source.indexOf('export async function offerHumanAuthorizedContext'));
-    const rawParams = signature.slice(0, signature.indexOf('}): Promise<HumanAuthorizedOutcome>') + 1);
-    // Strip the docblock: prose mentions "path" and "root" while explaining the
-    // seam, and matching comments is not what this test is about.
-    const params = rawParams.replace(/\/\*[\s\S]*?\*\//g, '');
-    assert.doesNotMatch(params, /\b(root|authorization|fixtureRoot|path)\b/, 'the entrypoint must take no root');
-    assert.match(params, /ui: ModUi \| undefined/);
-    // The only other parameter is the test-only mount seam. It cannot name a root
-    // - it is a mount *table* string - and production callers omit it.
-    assert.match(params, /mountTableForTests\?: string/);
-    // `input` is the wrapper object; its two members are what matter.
-    const names = [...params.matchAll(/(\w+)\??:/g)].map((m) => m[1]);
-    assert.deepEqual(names.sort(), ['input', 'mountTableForTests', 'ui']);
-    assert.equal(names.includes('root'), false, 'no member may be a root');
+    const slice = (name: string): string => {
+      const from = source.indexOf(`export async function ${name}(`);
+      const raw = source.slice(from, source.indexOf('}): Promise<HumanAuthorizedOutcome>', from) + 1);
+      // Strip docblocks: prose mentions "path", "root" and "mount table" while
+      // explaining the design, and matching comments is not what this test is for.
+      return raw.replace(/\/\*[\s\S]*?\*\//g, '');
+    };
+
+    const production = slice('offerHumanAuthorizedContext');
+    assert.match(production, /ui: ModUi \| undefined/);
+    assert.doesNotMatch(production, /\b(root|authorization|fixtureRoot|path)\b/, 'no root-shaped member');
+    assert.doesNotMatch(production, /mountTable/i, 'the production entrypoint must accept no mount override');
+    const productionMembers = [...production.matchAll(/(\w+)\??:/g)].map((m) => m[1]).sort();
+    assert.deepEqual(productionMembers, ['input', 'ui'], 'exactly one member: the ui wrapper');
+
+    // The injectable path exists, but as its own explicitly named export.
+    const testOnly = slice('offerHumanAuthorizedContextForTests');
+    assert.match(testOnly, /mountTable\?: string/);
+    assert.match(testOnly, /ui: ModUi \| undefined/);
+    assert.doesNotMatch(testOnly, /\b(root|authorization|fixtureRoot)\b/, 'the test helper names no root either');
+
+    // Runtime proof, not just a signature check: drive the production entrypoint
+    // with a real synthetic workspace and a fabricated table that WOULD satisfy
+    // the gate, and confirm the gate still refuses. If the override were ever
+    // forwarded, this root would be inspected and the assertion would fail.
+    const { root } = workspace();
+    const { verifyHumanRootPreconditions } = await import('../src/host/humanAuthorizedContext.ts');
+    const satisfying = TABLE(root);
+
+    // Sanity: the fabricated table is genuinely one that satisfies the gate, so a
+    // refusal below proves the table was not consulted.
+    const withTable = verifyHumanRootPreconditions(root, { mountTable: satisfying });
+    assert.equal(withTable.ok, true, 'the fabricated table must satisfy the gate, or this test proves nothing');
+
+    const forged = {
+      ui: ui(FULL_GRANT(root)),
+      mountTable: satisfying,
+      mountTableForTests: satisfying,
+    } as unknown as Parameters<typeof offerHumanAuthorizedContext>[0];
+
+    const outcome = await offerHumanAuthorizedContext(forged);
+    assert.equal(outcome.kind, 'idea-only', 'a forged mount table must not produce an inspection');
+    // On a platform with no real table the gate refuses; on Linux the real table
+    // applies and the root legitimately passes. Either way the *fabricated* data
+    // was not used: what matters is that the outcome matches the real platform,
+    // not the forged string.
+    const realGate = verifyHumanRootPreconditions(root);
+    if (realGate.ok) {
+      assert.equal(outcome.kind, 'inspected', 'when the real gate passes, so does the flow');
+    } else {
+      assert.match((outcome as { reason: string }).reason, /pre-read-check-failed/,
+        'when the real gate refuses, the flow refuses too - the forged table did not help');
+    }
   });
 });
 
@@ -224,7 +264,7 @@ describe('human authorization: three separate decisions in order', () => {
   it('asks opt-in, then the path, then root authorization, then read consent', async () => {
     const { root } = workspace();
     const events: string[] = [];
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root), { events }), mountTableForTests: TABLE(root) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root), { events }), mountTable: TABLE(root) });
 
     assert.equal(result.kind, 'inspected');
     // select(opt-in) -> input(path) -> notify(auth terms) -> select(authorize)
@@ -240,7 +280,7 @@ describe('human authorization: three separate decisions in order', () => {
       notify: (message: string) => { shown.push(message); },
     } as ModUi;
 
-    const result = await offerHumanAuthorizedContext({ ui: capturingUi, mountTableForTests: TABLE(root) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: capturingUi, mountTable: TABLE(root) });
     assert.equal(result.kind, 'inspected');
     assert.ok(shown.length >= 2, 'both disclosures were shown');
     assert.ok(shown[0]?.includes(root), 'the authorization notice names the exact root');
@@ -396,14 +436,14 @@ describe('human authorization: the root must be the one authorised', () => {
     const authorised = workspace();
     const other = workspace();
 
-    const { result, touched } = await touchesUnder(other.root, () => offerHumanAuthorizedContext({
+    const { result, touched } = await touchesUnder(other.root, () => offerHumanAuthorizedContextForTests({
       ui: ui({
         optIn: OPT_IN_LABELS.useRepository,
         typed: other.root,          // the proposal
         authorize: AUTHORIZE_LABELS.grant,
         consent: CONSENT_LABELS.grant,
       }),
-      mountTableForTests: TABLE(other.root),
+      mountTable: TABLE(other.root),
     }));
 
     // Here proposal and authorization name the same root, so this reads `other` -
@@ -477,7 +517,7 @@ describe('human authorization: the root must be the one authorised', () => {
     fs.symlinkSync(real, nodePath.join(parent, 'link'));
 
     const approved = nodePath.join(parent, 'link', 'project');
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(approved)), mountTableForTests: TABLE(approved) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(approved)), mountTable: TABLE(approved) });
 
     assert.equal(result.kind, 'idea-only');
     if (result.kind === 'idea-only') assert.match(result.reason, /unexpected-canonical-root/);
@@ -486,7 +526,7 @@ describe('human authorization: the root must be the one authorised', () => {
   it('refuses a missing root without falling back to a neighbour', async () => {
     const { root } = workspace();
     const absent = nodePath.join(nodePath.dirname(root), 'absent');
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(absent)), mountTableForTests: TABLE(absent) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(absent)), mountTable: TABLE(absent) });
 
     assert.equal(result.kind, 'idea-only');
     if (result.kind === 'idea-only') assert.match(result.reason, /pilot:missing/);
@@ -523,9 +563,9 @@ describe('human authorization: the root must be the one authorised', () => {
     // And the gate in the live flow: a root that is itself a mount point refuses
     // before any candidate is opened. (`/` covers every absolute path, so a sparse
     // table would still pass - the mount-point condition is the one that rejects.)
-    const { result, touched } = await touchesUnder(root, () => offerHumanAuthorizedContext({
+    const { result, touched } = await touchesUnder(root, () => offerHumanAuthorizedContextForTests({
       ui: ui(FULL_GRANT(root)),
-      mountTableForTests: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
+      mountTable: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
     }));
     assert.equal(result.kind, 'idea-only');
     if (result.kind === 'idea-only') assert.match(result.reason, /pre-read-check-failed/);
@@ -541,7 +581,7 @@ describe('human authorization: the root must be the one authorised', () => {
 describe('human authorization: results are honest', () => {
   it('reports verified evidence with accurate provenance', async () => {
     const { root } = workspace();
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)), mountTableForTests: TABLE(root) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root)), mountTable: TABLE(root) });
 
     assert.equal(result.kind, 'inspected');
     if (result.kind !== 'inspected') return;
@@ -558,7 +598,7 @@ describe('human authorization: results are honest', () => {
 
   it('reports no evidence when nothing is verified', async () => {
     const { root } = workspace({ 'README.md': '# hi\n', 'package.json': JSON.stringify({ name: 'x', version: '0.0.0' }) });
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)), mountTableForTests: TABLE(root) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root)), mountTable: TABLE(root) });
 
     assert.equal(result.kind, 'inspected');
     if (result.kind !== 'inspected') return;
@@ -575,14 +615,14 @@ describe('human authorization: results are honest', () => {
       'package.json': MANIFEST({ 'left-pad': '^1.3.0' }),
     });
 
-    const { bytes } = await touchesUnder(root, () => offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)), mountTableForTests: TABLE(root) }));
+    const { bytes } = await touchesUnder(root, () => offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root)), mountTable: TABLE(root) }));
     assert.ok(bytes > 0);
     assert.ok(bytes <= DEFAULT_BUDGET.maxTotalBytes, `read ${bytes}, over the ceiling`);
   });
 
   it('distinguishes a failed listing from an empty directory', async () => {
     const empty = workspace({ 'unrelated.txt': 'nothing this policy reads' });
-    const emptyResult = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(empty.root)), mountTableForTests: TABLE(empty.root) });
+    const emptyResult = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(empty.root)), mountTable: TABLE(empty.root) });
     assert.equal(emptyResult.kind, 'idea-only');
     if (emptyResult.kind === 'idea-only') assert.match(emptyResult.reason, /nothing-to-read/);
 
@@ -603,7 +643,7 @@ describe('human authorization: results are honest', () => {
 
     let failedResult;
     try {
-      failedResult = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(failing.root)), mountTableForTests: TABLE(failing.root) });
+      failedResult = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(failing.root)), mountTable: TABLE(failing.root) });
     } finally {
       (fsDefault as unknown as Record<string, unknown>).opendirSync = saved;
       syncBuiltinESMExports();
@@ -626,7 +666,7 @@ describe('human authorization: results are honest', () => {
     let storeTouched = false;
     void { get: () => { storeTouched = true; }, set: async () => { storeTouched = true; } };
 
-    const result = await offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)), mountTableForTests: TABLE(root) });
+    const result = await offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root)), mountTable: TABLE(root) });
     assert.equal(result.kind, 'inspected');
     assert.equal(storeTouched, false, 'no repository evidence or consent may be persisted');
 
@@ -649,11 +689,10 @@ describe('human authorization: results are honest', () => {
       ['opt-in-malformed', () => offerHumanAuthorizedContext({ ui: ui({ optIn: 'maybe' }) })],
       ['consent-refused', () => offerHumanAuthorizedContext({
         ui: ui({ ...FULL_GRANT(root), consent: CONSENT_LABELS.refuse }),
-        mountTableForTests: TABLE(root),
       })],
-      ['gate-refused', () => offerHumanAuthorizedContext({
+      ['gate-refused', () => offerHumanAuthorizedContextForTests({
         ui: ui(FULL_GRANT(root)),
-        mountTableForTests: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
+        mountTable: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
       })],
     ];
 
@@ -671,7 +710,7 @@ describe('human authorization: results are honest', () => {
   it('discloses host persistence on every outcome', async () => {
     const { root } = workspace();
     const outcomes = await Promise.all([
-      offerHumanAuthorizedContext({ ui: ui(FULL_GRANT(root)), mountTableForTests: TABLE(root) }),
+      offerHumanAuthorizedContextForTests({ ui: ui(FULL_GRANT(root)), mountTable: TABLE(root) }),
       offerHumanAuthorizedContext({ ui: ui({ ...FULL_GRANT(root), consent: CONSENT_LABELS.refuse }) }),
       offerHumanAuthorizedContext({ ui: ui({ optIn: OPT_IN_LABELS.ideaOnly }) }),
       offerHumanAuthorizedContext({ ui: undefined }),

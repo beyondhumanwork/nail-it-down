@@ -331,22 +331,54 @@ function renderInspected(result: Extract<PilotResult, { kind: 'inspected' }>): s
 }
 
 /**
- * Runs the human-authorised flow, once, for this invocation.
+ * The production-facing entrypoint.
  *
- * There is deliberately **no root parameter**. The only way a root becomes
- * authorised is the operator confirming it in `authorizeRootByHuman` at runtime.
+ * Takes **only** the UI. There is no root parameter and no mount-table override,
+ * so a caller cannot name a directory to authorise nor fabricate the mount data
+ * that the pre-read gate consults. The gate always reads the real
+ * `/proc/mounts`, and refuses when it cannot.
  */
 export async function offerHumanAuthorizedContext(input: {
   ui: ModUi | undefined;
-  /**
-   * Test seam only. Lets a synthetic test supply a mount table on platforms that
-   * have no `/proc/mounts`, so the success path is exercisable without pretending
-   * a real mount guarantee exists. Production callers omit it and the gate reads
-   * the real table - or refuses when there is none.
-   */
-  mountTableForTests?: string;
 }): Promise<HumanAuthorizedOutcome> {
-  if (!isUsable(input.ui)) {
+  return runHumanFlow(input.ui, {});
+}
+
+/**
+ * Test-only harness.
+ *
+ * Exists because macOS has no `/proc/mounts`, so without an injectable table the
+ * *success* path of this module could never be exercised on the machine that runs
+ * the tests. It is a separate named export, deliberately not a member of the
+ * production input, so reaching the override requires importing a symbol whose
+ * name says what it is for.
+ *
+ * This is a boundary by *convention and naming*, not by capability. Nothing stops
+ * production code from importing this function - TypeScript has no "test-only"
+ * enforcement, and a build-time exclusion would be a packaging concern this slice
+ * does not own. What it does guarantee is that the ordinary entrypoint cannot be
+ * misused by accident, which is the failure that was actually reported. A real
+ * capability boundary would need the mount check to be uninjectable, and then the
+ * positive path would be untestable on this platform; that trade-off is recorded
+ * as a blocker rather than hidden.
+ */
+export async function offerHumanAuthorizedContextForTests(input: {
+  ui: ModUi | undefined;
+  /** Fabricated mount table, so the covering-mount check can pass on macOS. */
+  mountTable?: string;
+}): Promise<HumanAuthorizedOutcome> {
+  return runHumanFlow(
+    input.ui,
+    input.mountTable === undefined ? {} : { mountTable: input.mountTable },
+  );
+}
+
+/** The flow both entrypoints share, so the two cannot drift apart. */
+async function runHumanFlow(
+  ui: ModUi | undefined,
+  gate: { mountTable?: string },
+): Promise<HumanAuthorizedOutcome> {
+  if (!isUsable(ui)) {
     return {
       kind: 'idea-only',
       reason: 'no-ui',
@@ -356,7 +388,7 @@ export async function offerHumanAuthorizedContext(input: {
     };
   }
 
-  const optIn = await askOptIn(input.ui);
+  const optIn = await askOptIn(ui);
   if (!optIn.ok) {
     return {
       kind: 'idea-only',
@@ -368,14 +400,14 @@ export async function offerHumanAuthorizedContext(input: {
   }
 
   const result = await runWorkspacePilot({
-    ui: input.ui,
+    ui,
     // The root is established by the human step, not supplied here. There is no
     // `authorization` member on purpose.
-    authorizeRoot: (proposed) => authorizeRootByHuman(input.ui as ModUi, proposed),
+    authorizeRoot: (proposed) => authorizeRootByHuman(ui, proposed),
     // Ownership and mount provenance, which the reader does not check. Fail-closed.
     beforeRead: (root) => verifyHumanRootPreconditions(
       root.canonical,
-      input.mountTableForTests === undefined ? {} : { mountTable: input.mountTableForTests },
+      gate.mountTable === undefined ? {} : { mountTable: gate.mountTable },
     ),
   });
 
