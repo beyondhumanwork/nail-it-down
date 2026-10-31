@@ -61,9 +61,11 @@ function workspace(files: Record<string, string> = {
  * platform provides a mount guarantee it does not.
  */
 function TABLE(root: string): string {
-  // Cover with `/`, and with the root's parent so the deepest entry is not the
-  // root itself (which the gate treats as "something was mounted over it").
-  return `/dev/sda1 / ext4 rw 0 0\n/dev/sda4 ${nodePath.dirname(root)} ext4 rw 0 0\n`;
+  // mountinfo format: id parent major:minor root mount-point options [optional...] - fstype source superopts
+  return [
+    `1 0 8:1 / / rw,relatime - ext4 /dev/sda1 rw`,
+    `2 1 8:4 / ${nodePath.dirname(root)} rw,relatime - ext4 /dev/sda4 rw`,
+  ].join('\n') + '\n';
 }
 
 type Answers = {
@@ -565,7 +567,7 @@ describe('human authorization: the root must be the one authorised', () => {
     if (!emptyTable.ok) assert.equal(emptyTable.reason, 'mount-unverifiable');
 
     // Something mounted exactly over the approved root.
-    const overMounted = verifyHumanRootPreconditions(root, { mountTable: `${TABLE(root)}/dev/sdb1 ${root} ext4 rw 0 0\n` });
+    const overMounted = verifyHumanRootPreconditions(root, { mountTable: `${TABLE(root)}3 2 8:9 / ${root} rw - ext4 /dev/sdb1 rw\n` });
     assert.equal(overMounted.ok, false);
     if (!overMounted.ok) assert.equal(overMounted.reason, 'root-is-a-mount-point');
 
@@ -579,7 +581,7 @@ describe('human authorization: the root must be the one authorised', () => {
     // table would still pass - the mount-point condition is the one that rejects.)
     const { result, touched } = await touchesUnder(root, () => offerHumanAuthorizedContextForTests({
       ui: ui(FULL_GRANT(root)),
-      mountTable: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
+      mountTable: `1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:9 / ${root} rw - ext4 /dev/sdb1 rw\n`,
     }));
     assert.equal(result.kind, 'idea-only');
     if (result.kind === 'idea-only') assert.match(result.reason, /pre-read-check-failed/);
@@ -706,7 +708,7 @@ describe('human authorization: results are honest', () => {
       })],
       ['gate-refused', () => offerHumanAuthorizedContextForTests({
         ui: ui(FULL_GRANT(root)),
-        mountTable: `/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 ${root} ext4 rw 0 0\n`,
+        mountTable: `1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 8:9 / ${root} rw - ext4 /dev/sdb1 rw\n`,
       })],
     ];
 
